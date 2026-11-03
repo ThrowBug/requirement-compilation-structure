@@ -9,3 +9,4 @@ docs/
 !/scripts/package.py
 
 AGENTS.md
+.vscode/

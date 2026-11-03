@@ -47,16 +47,16 @@ return IR
 
 这里可以把系统建模为：
 
-[\
-\boxed{\mathcal C:T\longrightarrow (IR,\Omega)\longrightarrow A}\
-]
+$$
+\boxed{\mathcal C:T\longrightarrow (IR,\Omega)\longrightarrow A}
+$$
 
 其中：
 
-- (T)：Requirement Syntax Tree，即需求语法树。
-- (IR)：由多类 Primitive 构成的中间表示。
-- (\Omega)：尚需履行或需要证明已履行的语义义务集合。
-- (A)：最终生成的可执行应用。
+- $T$：Requirement Syntax Tree，即需求语法树。
+- $IR$：由多类 Primitive 构成的中间表示。
+- $\Omega$：尚需履行或需要证明已履行的语义义务集合。
+- $A$：最终生成的可执行应用。
 
 这一点也是你的方法区别于简单多阶段 Prompting 的关键：编译阶段之间传递的不只是自然语言上下文，而是带有明确语义约束的结构化状态。
 
@@ -90,51 +90,51 @@ Obligation 可以理解为：
 
 第 15–22 页定义了数据库 Schema：
 
-[\
-S=\langle\mathcal E,\mathcal R\rangle\
-]
+$$
+S=\langle\mathcal E,\mathcal R\rangle
+$$
 
-其中 (\mathcal E) 是实体集合，(\mathcal R) 是关系集合。
+其中 $\mathcal E$ 是实体集合，$\mathcal R$ 是关系集合。
 
 所有数据库字段构成一个数据域：
 
-[\
-D(S)={e.a\mid e\in\mathcal E,\ a\in Attr(e)}\
-]
+$$
+D(S)=\{e.a\mid e\in\mathcal E,\ a\in Attr(e)\}
+$$
 
 需求语法树定义为：
 
-[\
-T=\langle N,E\_{\text{contain}},E\_{\text{ref}}\rangle\
-]
+$$
+T=\langle N,E_{\text{contain}},E_{\text{ref}}\rangle
+$$
 
 其中：
 
-- (N)：需求、场景和步骤节点。
-- (E\_{\text{contain}})：父子包含关系。
-- (E\_{\text{ref}})：引用关系，例如一个场景依赖于另一个场景的执行结果。
+- $N$：需求、场景和步骤节点。
+- $E_{\text{contain}}$：父子包含关系。
+- $E_{\text{ref}}$：引用关系，例如一个场景依赖于另一个场景的执行结果。
 
 然后分别定义读写义务：
 
-[\
-O_R,O_W\subseteq N\times D(S)\
-]
+$$
+O_R,O_W\subseteq N\times D(S)
+$$
 
-对单个节点 (n)，有：
+对单个节点 $n$，有：
 
-[\
-O_R(n)={d\mid(n,d)\in O_R}\
-]
+$$
+O_R(n)=\{d\mid(n,d)\in O_R\}
+$$
 
-[\
-O_W(n)={d\mid(n,d)\in O_W}\
-]
+$$
+O_W(n)=\{d\mid(n,d)\in O_W\}
+$$
 
 最终：
 
-[\
-\boxed{O(n)=\langle O_R(n),O_W(n)\rangle}\
-]
+$$
+\boxed{O(n)=\langle O_R(n),O_W(n)\rangle}
+$$
 
 这意味着，每一个需求节点都可以映射为一组数据库数据访问需求。
 
@@ -184,9 +184,9 @@ write_obligations: []
 
 注意，搜索列车不应修改数据库，因此：
 
-[\
-O_W(\text{SearchTrains})=\varnothing\
-]
+$$
+O_W(\text{SearchTrains})=\varnothing
+$$
 
 这与第 17–20 页逐步推断数据义务的实例一致。字段集表示的是需要访问哪些数据，不表示实际 SQL 的执行顺序。
 
@@ -225,11 +225,11 @@ REQ-1: Train Booking
 
 讲义规定：
 
-[\
-\boxed{O_X(p)=\bigcup\_{c\in Children(p)}O_X(c)}\
-]
+$$
+\boxed{O_X(p)=\bigcup_{c\in Children(p)}O_X(c)}
+$$
 
-其中 (X\in{R,W})。
+其中 $X\in\{R,W\}$。
 
 含义是：父节点的全部读写义务，必须由其子节点共同承担。
 
@@ -251,10 +251,10 @@ REQ-1: Train Booking
 
 对于一个已经完整分解的父节点，可以要求：
 
-[\
-O_X^{req}(p)\subseteq\
-\bigcup\_{c\in Children(p)}O_X^{alloc}(c)\
-]
+$$
+O_X^{req}(p)\subseteq
+\bigcup_{c\in Children(p)}O_X^{alloc}(c)
+$$
 
 再要求生成的子模块不存在未被授权的额外副作用。
 
@@ -282,21 +282,21 @@ Then:
 
 讲义定义：
 
-[\
-(n\xrightarrow{ref}m)\
-\Rightarrow\
-O_R(m)\subseteq O_R(n)\
-\land\
-O_W(m)\subseteq O_W(n)\
-]
+$$
+(n\xrightarrow{ref}m)
+\Rightarrow
+O_R(m)\subseteq O_R(n)
+\land
+O_W(m)\subseteq O_W(n)
+$$
 
 也就是：引用节点继承被引用节点的读写义务。
 
 由此：
 
-[\
-O(n)=O^{local}(n)\cup O^{ref}(n)\
-]
+$$
+O(n)=O^{local}(n)\cup O^{ref}(n)
+$$
 
 对于 `Select Train`：
 
@@ -347,9 +347,9 @@ Referenced obligations:
 
 编译结果可表示为：
 
-[\
-T=\langle N,E\_{\text{contain}},E\_{\text{ref}}\rangle\
-]
+$$
+T=\langle N,E_{\text{contain}},E_{\text{ref}}\rangle
+$$
 
 示例：
 
@@ -425,9 +425,9 @@ Relationships:
 
 输出：
 
-[\
-IR\_{DB}=\langle Entities,Attributes,Relations,Constraints\rangle\
-]
+$$
+IR_{DB}=\langle Entities,Attributes,Relations,Constraints\rangle
+$$
 
 验证： 引用字段存在、关系完整、关键约束不冲突，数据库模型能够支撑已经识别的数据需求。
 
@@ -437,15 +437,15 @@ IR\_{DB}=\langle Entities,Attributes,Relations,Constraints\rangle\
 
 输入为：
 
-[\
-(T,IR\_{DB})\
-]
+$$
+(T,IR_{DB})
+$$
 
 输出为：
 
-[\
-\Omega\_{DB}={O_R(n),O_W(n)\mid n\in N}\
-]
+$$
+\Omega_{DB}=\{O_R(n),O_W(n)\mid n\in N\}
+$$
 
 处理过程：
 
@@ -487,9 +487,9 @@ Schema mapping:
 
 讲义定义 API Primitive 为：
 
-[\
-\boxed{API=\langle signature,I,O,R,W,P,Q\rangle}\
-]
+$$
+\boxed{API=\langle signature,I,O,R,W,P,Q\rangle}
+$$
 
 | 字段          | 语义                         |
 | ----------- | -------------------------- |
@@ -549,9 +549,9 @@ postcondition:
 
 例如：
 
-[\
-API(STEP\text{-}1.1.1)={SearchTrains}\
-]
+$$
+API(STEP\text{-}1.1.1)=\{SearchTrains\}
+$$
 
 但复杂场景可以拆成多个 API，例如确认订单可能需要获取可用座位、创建订单以及读取订单详情。
 
@@ -559,9 +559,9 @@ API(STEP\text{-}1.1.1)={SearchTrains}\
 
 讲义第 30 页给出：
 
-[\
-\boxed{O_X(step)=\bigcup\_{i=1}^{k}O_X(API_i)}\
-]
+$$
+\boxed{O_X(step)=\bigcup_{i=1}^{k}O_X(API_i)}
+$$
 
 也就是，所有 API 共同承担该需求步骤的数据义务。
 
@@ -591,15 +591,15 @@ API(STEP\text{-}1.1.1)={SearchTrains}\
 
 讲义定义：
 
-[\
-\boxed{A=\langle kind,I,O,R,W,P,Q\rangle}\
-]
+$$
+\boxed{A=\langle kind,I,O,R,W,P,Q\rangle}
+$$
 
 其中：
 
-[\
-kind\in{SELECT,INSERT,UPDATE,DELETE}\
-]
+$$
+kind\in\{SELECT,INSERT,UPDATE,DELETE\}
+$$
 
 例如，对于 `SearchTrains`：
 
@@ -657,10 +657,10 @@ API 不仅包含数据库操作，也可能进行：
 
 因此 API 语义不能简单等同于底层 SQL，而应该要求：
 
-[\
-Sem(Compose(DBAccess_1,\ldots,DBAccess_k))\
-\models Contract(API)\
-]
+$$
+Sem(Compose(DBAccess_1,\ldots,DBAccess_k))
+\models Contract(API)
+$$
 
 也就是：底层操作按照指定顺序组合后，必须满足上层 API 的契约。
 
@@ -676,9 +676,9 @@ Sem(Compose(DBAccess_1,\ldots,DBAccess_k))\
 
 讲义定义：
 
-[\
-\boxed{ui=\langle id,type,parent,mode,data,prop\rangle}\
-]
+$$
+\boxed{ui=\langle id,type,parent,mode,data,prop\rangle}
+$$
 
 其中：
 
@@ -738,9 +738,9 @@ elements:
 
 讲义定义：
 
-[\
-\boxed{tr=\langle id,source,event,guard,read,action,write\rangle}\
-]
+$$
+\boxed{tr=\langle id,source,event,guard,read,action,write\rangle}
+$$
 
 | 字段       | 含义                      |
 | -------- | ----------------------- |
@@ -810,9 +810,9 @@ TrainResultList 重新渲染
 
 例如：
 
-[\
-tr.read \supseteq API.input\
-]
+$$
+tr.read \supseteq API.input
+$$
 
 这里的包含关系是在完成参数映射后理解的，并非要求 UI 变量名与 API 输入字段名完全一致。
 
@@ -845,12 +845,12 @@ tr.read \supseteq API.input\
 
 这里的 TDD 不是简单的“生成测试，再生成代码”，而是：
 
-[\
-\text{Contract}\
-\rightarrow\text{Test}\
-\rightarrow\text{Implementation}\
-\rightarrow\text{Feedback}\
-]
+$$
+\text{Contract}
+\rightarrow\text{Test}
+\rightarrow\text{Implementation}
+\rightarrow\text{Feedback}
+$$
 
 其中测试的依据是 IR 中的形式化约束，而不是再让 LLM 从原始自然语言独立猜测需要测试什么。
 
@@ -899,7 +899,7 @@ Backend API Primitive
 
 但讲义目前还没有详细定义代码生成器的规则、正确性条件及所有 Primitive 的可执行语义。
 
-尤其是 API 中的业务逻辑，如果仅有 ((I,O,R,W,P,Q))，可能还无法唯一决定具体算法。这一点需要在后续 IR Refinement 中解决。
+尤其是 API 中的业务逻辑，如果仅有 $(I,O,R,W,P,Q)$，可能还无法唯一决定具体算法。这一点需要在后续 IR Refinement 中解决。
 
 ### Step 10. Integration & Acceptance Validation：集成与验收
 
@@ -930,15 +930,15 @@ THEN:
 
 这也完成了从源需求到可执行应用的闭环：
 
-[\
-Requirement\
-\xrightarrow{Compilation}\
-IR\
-\xrightarrow{CodeGen}\
-Application\
-\xrightarrow{Acceptance}\
-ObservedBehavior\
-]
+$$
+Requirement
+\xrightarrow{Compilation}
+IR
+\xrightarrow{CodeGen}
+Application
+\xrightarrow{Acceptance}
+ObservedBehavior
+$$
 
 ## 五、把所有 Primitive 组织成统一的 IR
 
@@ -1072,19 +1072,19 @@ evidence:
 
 其数据库读写义务可能是：
 
-[\
-O_R={Booking.user_id,Booking.status}\
-]
+$$
+O_R=\{\texttt{Booking.user\_id},Booking.status\}
+$$
 
-[\
-O_W={Booking.status}\
-]
+$$
+O_W=\{Booking.status\}
+$$
 
 但这些义务本身不能保证：
 
-[\
-Booking.user_id=CurrentUser.id\
-]
+$$
+\texttt{Booking.user\_id}=CurrentUser.id
+$$
 
 因此，仅具有正确的 R/W 集合，仍可能实现错误的业务逻辑。
 
@@ -1101,36 +1101,36 @@ Booking.user_id=CurrentUser.id\
 
 例如订单取消，可以描述为：
 
-[\
-P:\
-booking.owner=currentUser\
-\land booking.status=Pending\
-]
+$$
+P:
+booking.owner=currentUser
+\land booking.status=Pending
+$$
 
-[\
-Q:\
-booking.status=Cancelled\
-]
+$$
+Q:
+booking.status=Cancelled
+$$
 
 再使用 Hoare Triple：
 
-[\
-\boxed{{P}\ CancelBooking\ {Q}}\
-]
+$$
+\boxed{\{P\}\,CancelBooking\,\{Q\}}
+$$
 
 对于该 API，R/W Obligation 约束访问的数据范围，Hoare Contract 约束行为逻辑，二者是互补关系。
 
 因此，一个更完整的语义义务集合可以表示为：
 
-[\
-\Omega=\
-\Omega\_{data}\
-\cup\Omega\_{contract}\
-\cup\Omega\_{state}\
-\cup\Omega\_{ui}\
-\cup\Omega\_{interaction}\
-\cup\Omega\_{temporal}\
-]
+$$
+\Omega=
+\Omega_{data}
+\cup\Omega_{contract}
+\cup\Omega_{state}
+\cup\Omega_{ui}
+\cup\Omega_{interaction}
+\cup\Omega_{temporal}
+$$
 
 这里的扩展不要求一开始就支持所有种类。你可以保留 Dataflow Obligation 作为第一阶段的理论核心，再逐步覆盖其他语义类别。
 
@@ -1142,9 +1142,9 @@ booking.status=Cancelled\
 
 讲义使用：
 
-[\
-O(p)=\bigcup_i O(c_i)\
-]
+$$
+O(p)=\bigcup_i O(c_i)
+$$
 
 但如果底层操作需要额外的字段，例如用于 Join 的 `train_id`，那么它可能超出用户直接要求的数据集合。
 
@@ -1173,12 +1173,12 @@ O(p)=\bigcup_i O(c_i)\
 
 这可以自然形成两个层级：
 
-[\
-\underbrace{Contract\ IR}*{What}*\
-*\longrightarrow*\
-*\underbrace{Operational\\ IR}*{How}\
-\longrightarrow Code\
-]
+$$
+\underbrace{\text{Contract IR}}_{\text{What}}
+\longrightarrow
+\underbrace{\text{Operational IR}}_{\text{How}}
+\longrightarrow \text{Code}
+$$
 
 其中，高层 IR 描述系统需要满足的语义，低层 IR 描述可执行操作及其组合方式。
 
@@ -1210,9 +1210,9 @@ Trigger
 
 讲义中的 `Resolved(Ω)` 是一个自然的结束条件，但理论上仍需要证明或验证：
 
-[\
-Sem(CodeGen(IR))\models Requirements\
-]
+$$
+Sem(CodeGen(IR))\models Requirements
+$$
 
 需要注意，测试通过无法在一般情况下证明该公式成立。
 
