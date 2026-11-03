@@ -134,7 +134,7 @@ def design_backend_apis(arc_dir: Path, pause: bool = False, top_k: int = 6, max_
         required = obligations["requirements"][rid]
         label = f"{number}/{len(tree.leaves)} {rid}"
         console.show(f"{label} | 1. Requirement and Dataflow Obligations", (
-            context["name"] + "\n" + context["description"] + "\n\n" + context["concatenated_steps"]
+            context["name"] + "\n" + context["description"] + "\n\n" + tree.concatenated_steps(rid)
             + "\n\nRequirement obligations:\n" + format_obligations({rid: required})
         ))
         console.show(f"{label} | 2. All Existing APIs", format_apis(design["apis"]))

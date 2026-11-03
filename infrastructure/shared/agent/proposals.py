@@ -1,6 +1,7 @@
 """Retry model proposals when parsing or consuming their returned records fails."""
 
 import json
+from infrastructure.utils.presentation.usage import count_event, model_task
 
 
 RESPONSE_ERRORS = (ValueError, KeyError, TypeError, AttributeError, IndexError)
@@ -36,14 +37,12 @@ def propose_json(model, instructions, request, accept, console, label, max_attem
         response = None
         try:
             prompt = instructions if "correction" not in request else instructions + "\n\n" + REPAIR_INSTRUCTIONS
-            if "correction" in request:
-                correction = request["correction"]
-                prompt += "\nActual failure: " + correction["error"]
-                if correction.get("details"):
-                    prompt += "\nRepair details:\n" + json.dumps(correction["details"], ensure_ascii=False, indent=2)
-            response = model.generate_json(prompt, request)
+            count_event("proposal_attempts")
+            with model_task("proposal" if attempt == 1 else "proposal_repair", label, attempt):
+                response = model.generate_json(prompt, request)
             return accept(response), response
         except RESPONSE_ERRORS as error:
+            count_event("proposal_rejections")
             feedback = response_feedback(error, response)
             feedback["failed_attempt"] = attempt
             console.show(f"{label} | Repair feedback", json.dumps(feedback, ensure_ascii=False, indent=2))

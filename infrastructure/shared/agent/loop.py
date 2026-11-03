@@ -3,6 +3,7 @@
 from infrastructure.shared.agent.files import FileWorkspace
 from infrastructure.shared.agent.protocol import FILE_EDIT_RULES
 from infrastructure.shared.agent.proposals import RESPONSE_ERRORS, response_feedback
+from infrastructure.utils.presentation.usage import count_event, model_task
 
 
 class AgentExhausted(ValueError):
@@ -28,17 +29,25 @@ def run_file_agent(model, instructions: str, task: dict, files: FileWorkspace, g
         console.show(f"{label} | Edit round {turn}/{max_turns}",
             "Generate file edits, then run the stage's compilation and test acceptance checks.")
         response, applied = None, False
+        checking = False
         try:
-            response = model.generate_json(instructions + "\n\n" + FILE_EDIT_RULES,
-                {"task": files.task_state(task), "files": files.state(), "feedback": feedback})
+            count_event("edit_rounds")
+            if turn > 1:
+                count_event("repair_rounds")
+            with model_task("file_edit" if turn == 1 else "file_repair", label, turn):
+                response = model.generate_json(instructions + "\n\n" + FILE_EDIT_RULES,
+                    {"task": files.task_state(task), "files": files.state(), "feedback": feedback})
             files.apply(response)
             applied = True
             if files.new_file is not None:
                 raise ValueError("Create the target file in the first edit before running acceptance checks")
             console.show(f"{label} | Edit round {turn}/{max_turns}",
                 str([edit["path"] for edit in response["edits"]]))
+            checking = True
             return {"turns": turn, "checks": gate()}
         except (*RESPONSE_ERRORS, RuntimeError) as error:
+            count_event("acceptance_failures" if checking else
+                "edit_rejections" if isinstance(error, RESPONSE_ERRORS) else "agent_request_failures")
             message = str(error)
             console.show(f"{label} | Repair feedback", message)
             rejected = (getattr(error, "feedback", {"error": message}) if applied

@@ -2,10 +2,12 @@
 
 from importlib import import_module
 from pathlib import Path
+from uuid import uuid4
 
 from infrastructure.utils.presentation.console import show_panel
 from infrastructure.utils.presentation.logging import console_log
 from infrastructure.utils.files import save_json
+from infrastructure.utils.presentation.usage import usage_snapshot
 
 
 class Compiler:
@@ -19,6 +21,7 @@ class Compiler:
         self.arc_dir = self.output_dir / ".arc"
         self.model_log = model_log
         self.port = port
+        self.run_id = uuid4().hex
         self.artifacts: dict[str, object] = {}
         self.current_stage: str | None = None
         self.report = {"status": "NOT_STARTED", "stages": {}}
@@ -27,16 +30,19 @@ class Compiler:
         """Call a pass directly, preserving its stage identity and error traceback."""
         self.current_stage = module + ".py"
         with console_log(self.output_dir, stage=self.current_stage,
-                model_log=self.model_log, debug_model_io=self.model_log):
+                model_log=self.model_log, debug_model_io=self.model_log, run_id=self.run_id) as session:
             try:
                 result = getattr(import_module(module), function)(*arguments, **options)
             except BaseException as error:
                 self.report["status"] = "INTERRUPTED" if isinstance(error, KeyboardInterrupt) else "FAILED"
                 self.report["stages"][module] = {"status": self.report["status"], "error": str(error)}
+                self.report["stages"][module]["model_usage"] = usage_snapshot(self.report["status"])
                 save_json(self.arc_dir / "compilation.json", self.report)
                 raise
             status = result.get("status", "GREEN") if isinstance(result, dict) else "GREEN"
+            session["result_status"] = status
             self.report["stages"][module] = {"status": status}
+            self.report["stages"][module]["model_usage"] = usage_snapshot(status)
             if isinstance(result, dict):
                 for key in ("failures", "verification"):
                     if key in result:
@@ -47,7 +53,8 @@ class Compiler:
     def compile(self) -> Path:
         """Execute the 13 compilation passes in order and return the generated application directory."""
         self.artifacts.clear()
-        self.report = {"status": "RUNNING", "stages": {}}
+        self.run_id = uuid4().hex
+        self.report = {"run_id": self.run_id, "status": "RUNNING", "stages": {}}
         show_panel("Requirement compiler | Pipeline",
             f"Input: {self.input_dir}\nOutput: {self.output_dir}\nPasses: 13\nDetailed model logs: {'enabled' if self.model_log else 'disabled'}")
         self.artifacts["project_files"] = self._run(

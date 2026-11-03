@@ -17,8 +17,8 @@ def load_context(arc_dir: Path):
 
 
 def requirement_context(tree, rid: str) -> dict:
-    """Return one requirement with its own structured steps and their concatenated teaching/model context."""
-    return {**tree.requirements[rid], "steps": [tree.steps[sid] for sid in tree.own_steps[rid]], "concatenated_steps": tree.concatenated_steps(rid)}
+    """Return one requirement with one complete structured scenario representation."""
+    return {**tree.requirements[rid], "steps": [tree.steps[sid] for sid in tree.own_steps[rid]]}
 
 
 def api_requirement_uses(tree, allocations: dict, aid: str) -> list[dict]:

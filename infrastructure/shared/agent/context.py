@@ -7,6 +7,8 @@ import re
 from infrastructure.shared.agent.files import FileWorkspace, editable_sources, source_paths
 from infrastructure.shared.project.entrypoints import selected_path
 from infrastructure.utils.files import read_source
+from infrastructure.shared.agent.feedback import compact_feedback
+from infrastructure.utils.presentation.logging import full_detail
 
 
 class SourceFiles:
@@ -106,15 +108,5 @@ class SourceFiles:
         self.include(workspace, named)
         self.include(workspace, workspace.writable)
 
-        def compact(item):
-            """Remove successful checks and reporter copies without truncating actual failures."""
-            if isinstance(item, dict):
-                if item.get("returncode") == 0:
-                    return {"returncode": 0}
-                return {key: compact(child) for key, child in item.items()
-                    if not (key in {"output", "stdout"} and item.get("failures"))}
-            if isinstance(item, list):
-                return [compact(child) for child in item]
-            return item
-
-        return compact(value)
+        full_detail("Agent repair feedback", json.dumps(value, ensure_ascii=False))
+        return compact_feedback(value)

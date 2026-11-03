@@ -6,6 +6,7 @@ import re
 import traceback
 from time import monotonic
 from uuid import uuid4
+from infrastructure.utils.presentation.usage import task_info, request_sizes
 from contextvars import ContextVar
 
 import httpx
@@ -62,6 +63,9 @@ def _message_text(message: dict) -> str:
 def _http_request(request: httpx.Request) -> None:
     """Capture the actual serialized body on every HTTP attempt, including retries."""
     session, call = session_info(), _call.get()
+    if session is not None and call is not None:
+        session["http_attempts"] = session.get("http_attempts", 0) + 1
+        call["http_attempts"] = call.get("http_attempts", 0) + 1
     if session and session.get("debug_model_io") and call:
         call["attempt"] = call.get("attempt", 0) + 1
         stage = session["stage"].split(" | ", 1)[0].removeprefix("Stage ")
@@ -101,7 +105,7 @@ def _http_response(response: httpx.Response) -> None:
 def http_client() -> httpx.Client:
     """Connect directly, retaining audit hooks and the SDK's transport limits."""
     from openai import DefaultHttpxClient
-    return DefaultHttpxClient(trust_env=False, timeout=httpx.Timeout(600),
+    return DefaultHttpxClient(trust_env=False, timeout=600,
         event_hooks={"request": [_http_request], "response": [_http_response]})
 
 
@@ -232,7 +236,7 @@ def _structured_output_view(content, usage, elapsed):
     return Group(*views)
 
 
-def _count_call(usage, elapsed, failed=False):
+def _count_call(usage, elapsed, failed=False, arguments=None):
     session = session_info()
     if session is None:
         return
@@ -244,6 +248,12 @@ def _count_call(usage, elapsed, failed=False):
         if value is not None:
             stats[key] = stats.get(key, 0) + value
             stats[key + " reports"] = stats.get(key + " reports", 0) + 1
+    call = _call.get() or {}
+    session.setdefault("usage_calls", []).append({"call_id": call.get("id"),
+        "task": task_info(), "model": (arguments or {}).get("model"),
+        "elapsed_seconds": elapsed, "failed": failed,
+        "http_attempts": call.get("http_attempts", 0), "tokens": _usage_counts(usage),
+        "request_regions": request_sizes(arguments or {})})
 
 
 def show_call_totals():
@@ -275,6 +285,7 @@ def invoke(client, arguments: dict):
         show_panel(f"[MODEL CALL] {label} | call {call_id[:8]}", f"Model: {arguments.get('model')}", tone="input")
     waiting = WaitingStatus()
     started = monotonic()
+    counted = False
 
     try:
         _record("request", arguments=arguments)
@@ -287,14 +298,16 @@ def invoke(client, arguments: dict):
         waiting.close()
         content = "\n".join(choice.message.content or "" for choice in response.choices)
         usage = raw.get("usage") or {}
-        _count_call(usage, elapsed)
+        _count_call(usage, elapsed, arguments=arguments)
+        counted = True
         full_detail(f"[MODEL OUTPUT] {label}", _usage_summary(usage) + f"\nRound-trip latency: {elapsed:.2f} s" + ("\n" + content if verbose else ""))
         show_panel(f"[MODEL OUTPUT] {label} | {elapsed:.2f}s",
             _output_view(content, usage, elapsed) if verbose else _usage_view(usage, elapsed), tone="output")
         return response
     except BaseException as error:
         elapsed = monotonic() - started
-        _count_call({}, elapsed, failed=True)
+        if not counted:
+            _count_call({}, elapsed, failed=True, arguments=arguments)
         waiting.close()
         chain = _exception_chain(error)
         cause = ": ".join(f"{item['type']}: {item['message']}" for item in chain[1:]) or None

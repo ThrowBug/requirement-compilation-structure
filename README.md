@@ -48,6 +48,20 @@ uv run main.py input --output-dir outputs/demo
 
 Add `--model-log` to display and save detailed model input/output, or `--port 33000` to change the backend port (default: 3000). Token usage and model latency are always shown.
 
+Each stage appends a content-free usage record to `.arc/model_usage.jsonl`, even
+without `--model-log`. Full pipeline runs also include a `model_usage` snapshot in
+each stage of `.arc/compilation.json`. Use `run_id` to group a pipeline run and
+`stage_run_id` to distinguish individual stage executions.
+
+Records distinguish SDK calls, observed HTTP attempts (including SDK retries),
+transport failures, proposal rejections, edit rejections, and acceptance failures.
+Token sums include a report count; `null` means the provider did not report the
+metric. Cached input is part of input, and reasoning is part of output: do not add
+these subsets again. Request region sizes are UTF-8 bytes/characters, not tokens.
+Usage records contain metrics and task labels, without prompt or source contents.
+
+Compilation errors and `COMPLETED_WITH_FAILURES` return a nonzero exit status.
+
 ### Step by step
 
 Run these commands in order. They call the same 13 passes with the same default settings as `main.py`. Step 01 uses `--no-browse` to match the non-interactive pipeline.
@@ -80,3 +94,11 @@ npm start
 ```
 
 Open `http://localhost:3000` (or the port you selected).
+
+## Local tests
+
+```bash
+uv run python -X utf8 -m unittest discover -s tests
+```
+
+These tests use local fixtures and mock model responses; they do not make live model requests.

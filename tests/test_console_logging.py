@@ -356,7 +356,7 @@ class ConsoleLogging(unittest.TestCase):
         terminal.isatty = lambda: True
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
-            with redirect_stdout(terminal), console_log(root):
+            with patch.dict("os.environ", {"TERM": "xterm"}), redirect_stdout(terminal), console_log(root):
                 waiting = WaitingStatus()
                 initial = terminal.getvalue()
                 self.assertEqual(initial.count("[WAITING]"), 1)

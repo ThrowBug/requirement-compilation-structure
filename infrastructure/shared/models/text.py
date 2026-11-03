@@ -91,7 +91,7 @@ class TextModel:
                 model=self.name,
                 messages=[
                     {"role": "system", "content": instructions.rstrip() + "\n" + JSON_OUTPUT_RULE},
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False, separators=(",", ":"))},
                 ],
                 **({"response_format": {"type": "json_object"}} if getattr(self, "json_mode", True) else {}),
                 **reasoning_arguments(self.name, mode),

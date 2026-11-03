@@ -10,6 +10,7 @@ from threading import RLock
 import traceback
 from contextvars import ContextVar
 from time import monotonic
+from uuid import uuid4
 
 from infrastructure.utils.presentation.stages import stage_label
 
@@ -64,7 +65,8 @@ def configure_console() -> None:
 
 
 @contextmanager
-def console_log(output_dir: Path, *, debug_model_io: bool = False, model_log: bool = True, stage: str | None = None):
+def console_log(output_dir: Path, *, debug_model_io: bool = False, model_log: bool = True, stage: str | None = None,
+        run_id: str | None = None):
     """Mirror a pass to compiler.log; explicit stage names support in-process compilation."""
     from infrastructure.utils.presentation.console import show_panel, show_dashboard
     from infrastructure.utils.presentation.artifacts import ARTIFACTS
@@ -85,15 +87,19 @@ def console_log(output_dir: Path, *, debug_model_io: bool = False, model_log: bo
                         artifacts[kind] = value
                 except (OSError, ValueError):
                     continue
-            token = _session.set({"output": output_dir, "stage": stage_label(script), "lock": lock, "log": log,
-                "debug_model_io": debug_model_io, "model_log": model_log, "artifacts": artifacts, "model_stats": {}})
             started = monotonic()
+            token = _session.set({"output": output_dir, "stage": stage_label(script), "lock": lock, "log": log,
+                "debug_model_io": debug_model_io, "model_log": model_log, "artifacts": artifacts, "model_stats": {},
+                "run_id": run_id or uuid4().hex, "stage_run_id": uuid4().hex,
+                "started_at": timestamp, "started": started})
+            status = "GREEN"
             model_logs = f"Full model I/O: {output_dir / 'model_calls.jsonl'}" if model_log else "Detailed model I/O logs: disabled"
             show_panel(f"[START] {stage_label(script)}", f"{timestamp}\nScript: {script}\nLogs: {output_dir / 'compiler.log'}\n{model_logs}")
             show_dashboard(stage_label(script), artifacts)
             try:
-                yield
+                yield session_info()
             except BaseException as error:
+                status = "INTERRUPTED" if isinstance(error, KeyboardInterrupt) else "FAILED"
                 if not isinstance(error, SystemExit):
                     traceback.print_exc(file=log)
                 show_panel(f"[FAILED] {stage_label(script)}", f"Stopped after {monotonic() - started:.1f}s", tone="error")
@@ -101,6 +107,14 @@ def console_log(output_dir: Path, *, debug_model_io: bool = False, model_log: bo
             else:
                 show_panel(f"[DONE] {stage_label(script)}", f"Completed in {monotonic() - started:.1f}s", tone="success")
             finally:
-                stdout.flush()
-                stderr.flush()
-                _session.reset(token)
+                try:
+                    from infrastructure.utils.presentation.usage import persist_usage
+                    persist_usage(session_info().get("result_status", status) if status == "GREEN" else status)
+                    from infrastructure.utils.presentation.model_io import show_call_totals
+                    show_call_totals()
+                except Exception as error:
+                    print(f"Could not save model usage: {error}", file=stderr)
+                finally:
+                    stdout.flush()
+                    stderr.flush()
+                    _session.reset(token)

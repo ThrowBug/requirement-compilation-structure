@@ -416,9 +416,10 @@ class FrontendFlow(unittest.TestCase):
                 return {"pages": {pid: self.ui["pages"][pid]}}
             if len(requests) == 2:
                 details = payload["correction"]["details"]
-                self.assertIn("Actual failure: Cannot read UI/data response", instructions)
-                self.assertIn('"missing_sections"', instructions)
-                self.assertIn("FINAL JSON", instructions)
+                self.assertIn("Cannot read UI/data response", payload["correction"]["error"])
+                self.assertNotIn("Actual failure:", instructions)
+                self.assertNotIn('"missing_sections"', instructions)
+                self.assertIn("FINAL JSON", details["repair"])
                 self.assertEqual(set(details["missing_sections"]),
                     {"elements", "bindings", "requirement_ui", "step_ui"})
                 self.assertEqual(set(details["response_template"]),

@@ -208,6 +208,16 @@ class CompilerCLI(unittest.TestCase):
                     self.assertEqual(error.exception.code, status)
                     cls.return_value.compile.assert_called_once_with()
 
+    def test_completed_with_failures_has_a_nonzero_exit_status(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = self.source(root)
+            with patch.object(main, 'Compiler') as cls, redirect_stderr(StringIO()):
+                cls.return_value.report = {"status": "COMPLETED_WITH_FAILURES"}
+                with self.assertRaises(SystemExit) as error:
+                    main.main([str(source), '--output-dir', str(root / 'output')])
+            self.assertEqual(error.exception.code, 1)
+
 
 if __name__ == '__main__':
     unittest.main()

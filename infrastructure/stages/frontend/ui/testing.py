@@ -62,22 +62,30 @@ def existence_suite(design: dict, pid: str) -> str:
                 continue
             prop = node.get("prop", {})
             if kind in {"input", "checkbox", "select"}:
+                input_type = "checkbox" if kind == "checkbox" else prop.get("input_type", "text")
                 if prop.get("label"):
                     lines.append(f'  await expect({locator}).toHaveAccessibleName({json.dumps(prop["label"])});')
                 if "placeholder" in prop:
                     lines.append(f'  await expect({locator}).toHaveAttribute("placeholder", {json.dumps(prop["placeholder"])});')
                 if kind in {"input", "checkbox"}:
-                    input_type = "checkbox" if kind == "checkbox" else prop.get("input_type", "text")
                     lines.append(f'  await expect({locator}).toHaveAttribute("type", {json.dumps(input_type)});')
                 if kind == "select":
                     for option in prop.get("options", []):
                         lines.append(f'  await expect({locator}.getByRole("option", {{ name: {json.dumps(option)}, exact: true }})).toHaveCount(1);')
-                if node.get("data"):
+                # Radio value identifies the option; binding/fixture state selects it.
+                if kind == "input" and input_type == "radio" and "value" in prop:
+                    lines.append(f'  await expect({locator}).toHaveValue({json.dumps(str(prop["value"]))});')
+                    if node.get("data"):
+                        selected = values[node["data"][0]] == prop["value"]
+                        lines.append(f"  await expect({locator}){'' if selected else '.not'}.toBeChecked();")
+                elif node.get("data"):
                     initial = values[node["data"][0]]
-                    if kind == "checkbox" and isinstance(initial, bool):
+                    if input_type == "checkbox" and kind in {"input", "checkbox"} and isinstance(initial, bool):
                         lines.append(f"  await expect({locator}){'' if initial else '.not'}.toBeChecked();")
-                    elif kind in {"input", "select"} and isinstance(initial, (str, int, float)) and not isinstance(initial, bool):
+                    elif input_type != "radio" and kind in {"input", "select"} and isinstance(initial, (str, int, float)) and not isinstance(initial, bool):
                         lines.append(f'  await expect({locator}).toHaveValue({json.dumps(str(initial))});')
+                elif kind in {"input", "select"} and input_type not in {"radio", "checkbox"} and "value" in prop:
+                    lines.append(f'  await expect({locator}).toHaveValue({json.dumps(str(prop["value"]))});')
             if prop.get("text") and kind in {"heading", "text", "button", "link", "alert"}:
                 lines.append(f'  await expect({locator}).toContainText({json.dumps(prop["text"])});')
             if kind == "alert":
