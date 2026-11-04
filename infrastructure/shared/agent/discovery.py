@@ -75,7 +75,12 @@ class DiscoverySession:
 
     def observe(self, result):
         """Apply the same no-progress feedback to semantic queries and file reads."""
-        fingerprint = json.dumps(result, sort_keys=True, ensure_ascii=False)
+        canonical = result
+        if isinstance(result.get('missing'), list):
+            # Exact-ID misses are a set of absent identities. Permuting the query
+            # does not provide new evidence or reset no-progress detection.
+            canonical = {**result, 'missing': sorted(result['missing'])}
+        fingerprint = json.dumps(canonical, sort_keys=True, ensure_ascii=False)
         count = self.results.get(fingerprint, 0) + 1
         self.results[fingerprint] = count
         if count >= 3:
@@ -218,6 +223,13 @@ def project_index(output, *, kinds, file_roots=()):
                 for pid in ui['pages']:
                     path = f'frontend/tests/ui/{pid}.spec.ts'
                     test_owners[path] = [rid for rid in owners(ui, pid) if rid in requirements]
+                acceptance = artifact('independent_acceptance.json', {'requirements': {}})
+                for rid, entry in acceptance.get('requirements', {}).items():
+                    path = entry.get('test_path')
+                    if rid in requirements and isinstance(path, str):
+                        identities = test_owners.setdefault(path, [])
+                        if rid not in identities:
+                            identities.append(rid)
             prefixes = tuple(root + '/' for root in file_roots)
             result['test_requirement'] = {path: ids for path, ids in test_owners.items()
                 if path.startswith(prefixes)}

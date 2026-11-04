@@ -42,15 +42,16 @@ class ContextDiscovery(unittest.TestCase):
             root = Path(directory)
             (root / 'frontend/src').mkdir(parents=True)
             path = 'frontend/src/helper.ts'
-            (root / path).write_text('broken')
+            (root / path).write_text('broken\ninitial implementation')
             model = Mock()
             model.generate_json.side_effect = [
-                {'tool_calls': [{'tool': 'read_file', 'arguments': {'path': path}}]},
-                propose_files(root, [{'path': path, 'content': 'fixed'}])]
+                {'tool_calls': [{'tool': 'read_file', 'path': path}]},
+                propose_files(root, [{'path': path, 'content': 'fixed', 'old_content': 'broken'}])]
             gate = Mock(return_value={})
             run_file_agent(model, '', {}, FileTools(root, allow_write=lambda path: path.startswith(('frontend/src/', 'backend/src/'))), gate, 1, Mock(), 'test')
-            self.assertEqual((root / path).read_text(), 'fixed')
+            self.assertEqual((root / path).read_text(), 'fixed\ninitial implementation')
             gate.assert_called_once()
+
 
     def test_large_input_and_more_than_six_ids_have_no_artificial_cap(self):
         records = {f'Entity{i}': {'description': 'x' * 30000, 'fields': {}} for i in range(8)}
@@ -77,7 +78,7 @@ class ContextDiscovery(unittest.TestCase):
             ContextIndex({'schema': {'Account': {'description': 'account', 'fields': {}}}}))
         self.assertEqual(result, {})
         payload = model.generate_json.call_args.args[1]
-        self.assertIn('same evidence', payload['correction']['error'])
+        self.assertIn('same evidence', payload['context_result']['error'])
 
     def test_malformed_query_returns_feedback_then_can_finish(self):
         model = Mock(generate_json=Mock(side_effect=[{'context_request': {'kind': 'absent'}}, {'entities': {}}]))
@@ -91,14 +92,14 @@ class ContextDiscovery(unittest.TestCase):
             (root / 'frontend/src').mkdir(parents=True)
             paths = [f'frontend/src/helper{i}.ts' for i in range(7)]
             for number, path in enumerate(paths):
-                (root / path).write_text(f'export const value{number} = {number};')
-            responses = [{'tool_calls': [{'tool': 'read_file', 'arguments': {'path': path}}]} for path in paths]
-            responses.append(propose_files(root, [{'path': paths[-1], 'content': 'fixed'}]))
+                (root / path).write_text(f'export const value{number} = {number};\n')
+            responses = [{'tool_calls': [{'tool': 'read_file', 'path': path}]} for path in paths]
+            responses.append(propose_files(root, [{'path': paths[-1], 'content': 'fixed\n', 'old_content': f'export const value{len(paths) - 1} = {len(paths) - 1};\n'}]))
             model = Mock(generate_json=Mock(side_effect=responses))
             result = run_file_agent(model, '', {'requirement': 'x' * 190000}, FileTools(root, allow_write=lambda path: path.startswith(('frontend/src/', 'backend/src/'))),
                 Mock(return_value={}), 1, Mock(), 'current task')
             self.assertEqual(result['turns'], 1)
-            self.assertEqual((root / paths[-1]).read_text(), 'fixed')
+            self.assertEqual((root / paths[-1]).read_text(), 'fixed\n')
             self.assertEqual(model.generate_json.call_count, 8)
 
 
@@ -131,9 +132,9 @@ class ContextDiscovery(unittest.TestCase):
             save_text(root / path, 'secret first line\nvisible middle\nsecret last line\n')
             requests = []
             responses = [
-                {'tool_calls': [{'tool': 'read_file', 'arguments': {'path': path, 'start_line': 2, 'end_line': 2}}]},
-                {'tool_calls': [{'tool': 'edit_file', 'arguments': {'path': path, 'operation': 'replace',
-                    'old_content': 'visible middle', 'new_content': 'updated middle'}}]}]
+                {'tool_calls': [{'tool': 'read_file', 'path': path, 'start_line': 2, 'end_line': 2}]},
+                {'tool_calls': [{'tool': 'edit_file', 'path': path, 'operation': 'replace',
+                    'old_content': 'visible middle', 'new_content': 'updated middle'}]}]
             def generate(_, payload):
                 requests.append(deepcopy(payload))
                 return responses[len(requests) - 1]
@@ -142,7 +143,8 @@ class ContextDiscovery(unittest.TestCase):
                 gate, 1, Mock(), 'wiring')
             excerpt_request = requests[1]
             self.assertNotIn(path, excerpt_request['files'])
-            self.assertEqual(excerpt_request['context_result']['tool_results'][0]['result']['content'], 'visible middle\n')
+            self.assertEqual(excerpt_request['read_files'][path][0]['content'], 'visible middle\n')
+            self.assertEqual(excerpt_request['context_result'], {'read_paths': [path]})
             self.assertNotIn('secret', str(excerpt_request))
             gate.assert_called_once()
             self.assertEqual((root / path).read_text(), 'secret first line\nupdated middle\nsecret last line\n')

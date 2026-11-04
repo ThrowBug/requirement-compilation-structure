@@ -1,6 +1,6 @@
 """Shared tool definitions, parameter schemas and execution effects."""
 
-from .files import edit_file, read_file
+from .files import bind_target, edit_file, read_file
 
 
 def definition(name, description, properties, required, example):
@@ -13,6 +13,11 @@ def definition(name, description, properties, required, example):
 
 STRING = {"type": "string"}
 TOOL_REGISTRY = {
+    "bind_target": (bind_target, definition("bind_target", "Claim an already existing writable file as task.file_target. "
+        "Use this when an earlier task created the current page/API/test file without registering its target. "
+        "This registers ownership, does not change contents, and still runs acceptance.",
+        {"path": STRING}, ["path"],
+        {"tool": "bind_target", "path": "frontend/src/pages/Register.tsx"}), "write"),
     "read_file": (read_file, definition("read_file", "Read a relevant project file or inclusive 1-based line range. "
         "Prefer supplied files; read only missing evidence needed for this task.",
         {"path": STRING, "start_line": {"type": "integer", "minimum": 1},

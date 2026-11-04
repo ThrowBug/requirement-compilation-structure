@@ -10,6 +10,7 @@ from infrastructure.utils.files import save_text
 
 CONFIG = "frontend/playwright.e2e.config.ts"
 FIXTURE = "frontend/tests/e2e/support/context.ts"
+OBSERVATIONS = "frontend/tests/e2e/support/observations.ts"
 RUNNER = "frontend/scripts/test-e2e.mjs"
 VITE_CONFIG = "frontend/vite.e2e.config.ts"
 
@@ -81,6 +82,7 @@ import { basename, dirname } from "node:path";
 import { createDatabaseClient } from "../../../../backend/src/db/client.js";
 import { initializeDatabase } from "../../../../backend/src/db/initialize.js";
 export { fixturePasswordHash } from "../../../../backend/tests/support/context.js";
+export { observeMutations } from "./observations.js";
 export const test = base.extend<{ database: Database.Database; applicationErrors: void }>({
   database: [async ({}, use) => {
     const path = process.env.ARC_E2E_DB_FILE;
@@ -114,11 +116,43 @@ export { expect };
 '''
 
 
+OBSERVATION_SOURCE = '''// Observe requests independently of compiler-selected API names and response-body lifetime.
+import type { Page, Request } from "@playwright/test";
+
+/** Visit the page first. The action must await its visible business completion.
+ * Read request data synchronously; do not require response.json() after navigation.
+ * Select the business operation by submitted data when unrelated mutations may occur.
+ */
+export async function observeMutations(
+  page: Page,
+  action: () => Promise<unknown>,
+  belongsToOperation: (request: Request) => boolean = () => true,
+): Promise<Request[]> {
+  const origin = new URL(page.url()).origin;
+  if (origin === "null") throw new Error("Visit the application page before observing mutations");
+  const requests: Request[] = [];
+  let observationError: unknown;
+  const capture = (request: Request) => {
+    try {
+      if (!["GET", "HEAD", "OPTIONS"].includes(request.method()) &&
+          new URL(request.url()).origin === origin && belongsToOperation(request)) requests.push(request);
+    } catch (error) { observationError = error; }
+  };
+  page.on("request", capture);
+  try {
+    await action();
+    if (observationError) throw observationError;
+    return requests;
+  } finally { page.off("request", capture); }
+}
+'''
+
+
 def prepare_e2e(output, backend):
     """Write E2E configuration, real-server launchers, isolated database fixtures, and the npm test command."""
     sources = {CONFIG: CONFIG_SOURCE, RUNNER: RUNNER_SOURCE,
         VITE_CONFIG: 'import { defineConfig, mergeConfig } from "vite";\nimport base from "./vite.config";\nexport default mergeConfig(base, defineConfig({ server: { proxy: { "/api": process.env.ARC_BACKEND_URL! } } }));\n',
-        FIXTURE: FIXTURE_SOURCE}
+        FIXTURE: FIXTURE_SOURCE, OBSERVATIONS: OBSERVATION_SOURCE}
     for relative, source in sources.items():
         save_text(output / relative, source)
     path = output / "package.json"

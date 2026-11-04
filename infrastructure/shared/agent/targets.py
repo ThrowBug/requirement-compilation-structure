@@ -24,7 +24,8 @@ class FileTarget:
     def context(self):
         return {"kind": self.kind, "id": self.identity, "directory": self.directory,
             "path": self.path, "instructions": "Use edit_file for this target. Preserve the supplied path; "
-                "if path is null, choose a relative path inside directory. Create this target before new helpers."}
+                "if path is null, choose a relative path inside directory. Create a missing target with edit_file, "
+                "or use bind_target to claim its existing writable implementation before creating helpers."}
 
     def adapt(self, path):
         """Only adapt creation of the unambiguous current target, never arbitrary repairs."""

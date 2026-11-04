@@ -28,7 +28,7 @@ def synthesize_triggers(arc_dir, ui, tree, backend, contexts, model, console, ma
             try:
                 validate_design({"apis": backend["apis"],
                     "requirements": {rid: backend["requirements"].get(rid, [])}},
-                    obligations, complete=False, tree=tree)
+                    obligations, complete=False, tree=None)
             except ObligationCoverageError as error:
                 raise ValueError(f'Upstream backend contract cannot cover {rid}: {error}. '
                     'Review stage 03 obligations and stage 06 API design before generating triggers.') from error

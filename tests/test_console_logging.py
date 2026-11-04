@@ -11,7 +11,7 @@ from unittest.mock import patch
 import httpx
 from openai import OpenAI
 
-from infrastructure.shared.models.text import TextModel, reasoning_arguments
+from infrastructure.shared.models.text import TextModel, reasoning_arguments, JSON_OUTPUT_RULE
 from infrastructure.shared.models.vision import VisualModel
 from infrastructure.utils.presentation.console import DemoConsole, preview, show_panel, display_width, WaitingStatus
 from infrastructure.utils.presentation.logging import console_log
@@ -108,7 +108,7 @@ class ConsoleLogging(unittest.TestCase):
         self.assertEqual([item["event"] for item in records], ["request", "http_request", "http_response", "response"])
         wire_request = json.loads(records[1]["body"])
         self.assertEqual(wire_request, records[0]["arguments"])
-        self.assertTrue(wire_request["messages"][0]["content"].endswith("Return exactly one JSON object without Markdown."))
+        self.assertTrue(wire_request["messages"][0]["content"].endswith(JSON_OUTPUT_RULE))
         self.assertEqual(json.loads(records[2]["body"])["choices"][0]["message"]["content"], raw_content)
         self.assertEqual(records[3]["response"]["choices"][0]["message"]["content"], raw_content)
         self.assertEqual(len({record["call_id"] for record in records}), 1)
@@ -141,7 +141,7 @@ class ConsoleLogging(unittest.TestCase):
                 attempt = 1 + sum(record["call_id"] == call_id for record in request_records[:index])
                 input_file = next(directory.glob(f"06.*.{call_id[:8]}.{attempt}.model.input"))
                 output_file = input_file.with_name(input_file.name.removesuffix(".input") + ".ouput")
-                self.assertEqual(input_file.read_text(), "Generate.\nKeep line breaks.\nReturn exactly one JSON object without Markdown.\n\n{}")
+                self.assertEqual(input_file.read_text(), "Generate.\nKeep line breaks.\n" + JSON_OUTPUT_RULE + "\n\n{}")
                 body = json.loads(response_record["body"])
                 expected = body["error"]["message"] if "error" in body else body["choices"][0]["message"]["content"]
                 self.assertEqual(output_file.read_text(), expected)
@@ -227,7 +227,7 @@ class ConsoleLogging(unittest.TestCase):
             with self.assertRaises(json.JSONDecodeError):
                 model.generate_json("Design complete UI", {})
         self.assertNotIn("response_format", attempts[0])
-        self.assertIn("Return exactly one JSON object without Markdown", attempts[0]["messages"][0]["content"])
+        self.assertIn(JSON_OUTPUT_RULE, attempts[0]["messages"][0]["content"])
 
     def test_length_feedback_explains_output_budget_instead_of_attempting_to_parse_partial_code(self):
         model = self.model(lambda request: httpx.Response(200, json=self.response('{"edits":[', finish="length")))
@@ -356,7 +356,7 @@ class ConsoleLogging(unittest.TestCase):
         terminal.isatty = lambda: True
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
-            with redirect_stdout(terminal), console_log(root):
+            with patch.dict("os.environ", {"TERM": "xterm"}), redirect_stdout(terminal), console_log(root):
                 waiting = WaitingStatus()
                 initial = terminal.getvalue()
                 self.assertEqual(initial.count("[WAITING]"), 1)

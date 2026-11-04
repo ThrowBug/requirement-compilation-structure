@@ -101,4 +101,6 @@ def test_run_status(report: dict) -> str:
     if re.search(r"^BACKEND_(STARTUP|RUNTIME)_ERROR:", report["output"], re.MULTILINE):
         return "REPAIR_REQUIRED"
     require_red(report)
+    from infrastructure.shared.agent.failures import observe_failure
+    observe_failure(ValueError(report["output"]), expected_red=True, will_retry=False, phase="tdd_initial")
     return "RED_CONFIRMED"

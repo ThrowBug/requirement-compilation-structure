@@ -24,6 +24,10 @@ Read the supplied package/configuration and actual source to use the project's t
 stack. Create task.file_target or repair implementation_path, using exports, props and
 state appropriate to the actual components. The design is a
 reference prototype, not a fixed executable host or mandatory component API.
+An earlier page task may already have created this page as a route placeholder. When
+task.file_target.path is null and its writable implementation exists, explicitly use
+bind_target for that page file, then repair it locally. Do not repeatedly create it or
+modify unrelated files to satisfy target registration. Binding still runs all checks.
 
 You own the application entrypoints, routing, component composition and state bindings.
 Read task.application_entrypoints as needed and incrementally connect this page to the

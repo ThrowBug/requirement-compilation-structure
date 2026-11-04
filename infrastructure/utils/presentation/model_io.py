@@ -17,6 +17,8 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.text import Text
 from infrastructure.utils.presentation.artifacts import proposal_kind, render_artifact, table, text
+from infrastructure.shared.usage.recorder import current_recorder, record_event
+from infrastructure.shared.agent.experiments import consume, provider_attempt
 
 
 _call = ContextVar("compiler_model_call", default=None)
@@ -62,8 +64,12 @@ def _message_text(message: dict) -> str:
 def _http_request(request: httpx.Request) -> None:
     """Capture the actual serialized body on every HTTP attempt, including retries."""
     session, call = session_info(), _call.get()
-    if session and session.get("debug_model_io") and call:
+    if call:
+        if call.get("attempt", 0):
+            consume("calls")
         call["attempt"] = call.get("attempt", 0) + 1
+    record_event("http_attempt", method=request.method, attempt=call.get("attempt") if call else None)
+    if session and session.get("debug_model_io") and call:
         stage = session["stage"].split(" | ", 1)[0].removeprefix("Stage ")
         task = re.sub(r"[^\w.-]+", "_", call["activity"].split(" | ", 1)[0]).strip("._")[:24] or "model"
         directory = session["output"] / ".arc" / "model_logs"
@@ -101,7 +107,7 @@ def _http_response(response: httpx.Response) -> None:
 def http_client() -> httpx.Client:
     """Connect directly, retaining audit hooks and the SDK's transport limits."""
     from openai import DefaultHttpxClient
-    return DefaultHttpxClient(trust_env=False, timeout=httpx.Timeout(600),
+    return DefaultHttpxClient(trust_env=False, timeout=600,
         event_hooks={"request": [_http_request], "response": [_http_response]})
 
 
@@ -270,6 +276,7 @@ def show_call_totals():
 
 def invoke(client, arguments: dict):
     """Audit one SDK call and show a static waiting message until it returns."""
+    provider_attempt()
     call_id = uuid4().hex
     activity = current_activity()
     session = session_info()
@@ -283,6 +290,7 @@ def invoke(client, arguments: dict):
         show_panel(f"[MODEL CALL] {label} | call {call_id[:8]}", f"Model: {arguments.get('model')}", tone="input")
     waiting = WaitingStatus()
     started = monotonic()
+    usage_recorded = False
 
     try:
         _record("request", arguments=arguments)
@@ -295,6 +303,10 @@ def invoke(client, arguments: dict):
         waiting.close()
         content = "\n".join(choice.message.content or "" for choice in response.choices)
         usage = raw.get("usage") or {}
+        if recorder := current_recorder():
+            recorder.call(model=str(arguments.get("model", "")), duration_seconds=elapsed,
+                status="OK", usage=usage, call_id=call_id, transport_attempts=(_call.get() or {}).get("attempt", 1))
+            usage_recorded = True
         _count_call(usage, elapsed)
         full_detail(f"[MODEL OUTPUT] {label}", _usage_summary(usage) + f"\nRound-trip latency: {elapsed:.2f} s" + ("\n" + content if verbose else ""))
         show_panel(f"[MODEL OUTPUT] {label} | {elapsed:.2f}s",
@@ -302,6 +314,10 @@ def invoke(client, arguments: dict):
         return response
     except BaseException as error:
         elapsed = monotonic() - started
+        if not usage_recorded and (recorder := current_recorder()):
+            recorder.call(model=str(arguments.get("model", "")), duration_seconds=elapsed,
+                status="INTERRUPTED" if isinstance(error, KeyboardInterrupt) else "FAILED",
+                call_id=call_id, error_type=type(error).__name__, transport_attempts=(_call.get() or {}).get("attempt", 1))
         _count_call({}, elapsed, failed=True)
         waiting.close()
         chain = _exception_chain(error)

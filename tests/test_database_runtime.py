@@ -59,10 +59,11 @@ class DatabaseRepairProtocol(unittest.TestCase):
                     self.assertNotIn(other, payload['files'])
                     self.assertIn('Note', payload['task']['entities'])
                     self.assertIn('backend/src/db/tables/Note.sql', payload['files'])
-                    return {'tool_calls': [{'tool': 'read_file', 'arguments': {'path': other}}]}
+                    return {'tool_calls': [{'tool': 'read_file', 'path': other}]}
                 self.assertNotIn(other, payload['files'])
-                self.assertTrue(payload['context_result']['tool_results'][0]['result']['writable'])
-                return propose_files(output, [{'path': other, 'content': SQL.replace('Note', 'Audit')}])
+                self.assertTrue(payload['read_files'][other][0]['writable'])
+                self.assertEqual(payload['context_result'], {'read_paths': [other]})
+                return propose_files(output, [{'path': other, 'content': SQL.replace('Note', 'Audit'), 'old_content': SQL.replace('Note', 'Audit')}])
             checks = Mock()
             checks.run.side_effect = [{'returncode': 1, 'error': 'Missing table: Note\n at initialize'},
                 {'returncode': 0, 'status': 'GREEN'}]
@@ -80,7 +81,7 @@ class DatabaseRepairProtocol(unittest.TestCase):
             workspace = FileTools(output, allow_write=lambda candidate: candidate == path)
             workspace.files.add(path)
             self.assertTrue(workspace.state()[path]['writable'])
-            workspace.execute(propose_files(output, [{'path': path, 'content': SQL}])["tool_calls"])
+            workspace.execute(propose_files(output, [{'path': path, 'content': SQL, 'old_content': BAD_SQL}])["tool_calls"])
             from infrastructure.shared.agent.context import SourceFiles
             ordinary = SourceFiles(output, root='backend/src', tests_root='backend/tests').workspace(references=[path])
             self.assertFalse(ordinary.state()[path]['writable'])

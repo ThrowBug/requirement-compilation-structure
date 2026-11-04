@@ -5,7 +5,6 @@ import yaml
 
 from infrastructure.shared.agent.tools import FileTools
 from infrastructure.shared.agent.loop import run_file_agent
-from infrastructure.shared.agent.conventions import task_conventions
 from infrastructure.shared.agent.context import SourceFiles
 from infrastructure.shared.agent.discovery import project_index
 from infrastructure.shared.agent.recovery import implementation_task
@@ -14,13 +13,13 @@ from infrastructure.stages.backend.context import requirement_context, related_s
 from infrastructure.stages.backend.testing import BackendChecks, require_green as require_backend_green
 from infrastructure.stages.requirements.tree import RequirementTree
 from infrastructure.stages.frontend.triggers.implementation import scenario_context, IMPLEMENT_INSTRUCTIONS, editable_runtime_path, test_run_status
-from infrastructure.stages.frontend.triggers.e2e_runtime import FIXTURE
+from infrastructure.stages.frontend.triggers.e2e_runtime import FIXTURE, OBSERVATIONS
 from infrastructure.stages.frontend.triggers.testing import E2EChecks, test_path
 from infrastructure.stages.frontend.triggers.scope import TriggerCheckFailure
 from infrastructure.stages.frontend.triggers.design import api_ids
 from infrastructure.stages.frontend.ui.runtime import APPLICATION_ENTRYPOINTS
 from infrastructure.stages.frontend.ui.testing import FrontendChecks, require_green, test_path as ui_test_path
-from infrastructure.utils.files import save_json
+from infrastructure.utils.files import read_artifact, save_json
 from infrastructure.shared.project.git import checkpoint
 
 INSTRUCTIONS = '''Write independent final acceptance tests for ONE original requirement.
@@ -39,10 +38,17 @@ Use two distinct identities where identity isolation matters; a test that only c
 one account cannot reject an implementation returning the first account for everyone.
 For required rejection-without-writes, verify the relevant persisted result is unchanged.
 Prefer user-visible outcomes over unspecified cookie/hash encodings or storage strategies.
-For a When action requiring one API operation, also observe its relevant method/endpoint and
-reject duplicate submissions when the requirement expects one operation. Start observing
-before the action, wait for its response and business completion, and exclude unrelated
-page-entry calls or explicitly required retries. Do not count all requests globally.
+Transport URLs chosen by generated API designs are not original business requirements.
+Do not invent a required endpoint, response shape or status from a generated API name.
+If original_requirement explicitly specifies an HTTP contract, assert that exact contract.
+Otherwise assert visible completion and the required persisted result, not a particular
+internal URL or response body. For a single required mutation, use observeMutations from
+the supplied fixture around the When action and its retrying visible-completion assertion;
+assert one matching mutation across ALL endpoints, using submitted business identity/data
+to exclude unrelated mutations. An earlier and a newer registration URL are not two
+required submissions. Preserve rejection-without-writes and distinct-identity assertions.
+Request data remain inspectable after navigation; do not wait for an unspecified response
+body after a full document navigation. Do not count all application requests globally.
 There is no arbitrary test-count quota: cover the few important outcomes for this task.
 
 The database fixture restores requirement-defined startup data before each test. Reuse
@@ -64,6 +70,16 @@ or environment is wrong, return tool_calls=[] and explain it; the failed accepta
 failed. Compilation passing is enough to finish this review; you are NOT asked to turn a
 business failure GREEN. Never adjust expected values just to match observed wrong behavior.
 Use original requirements as authority; no application source or process tests are available.'''
+
+REVIEW_INSTRUCTIONS += '''
+Review endpoint assumptions as well as selectors. A generated API URL is not an original
+requirement. If the original does not prescribe transport, correct a hardcoded endpoint
+wait into visible-business completion, persisted-result checks and observeMutations.
+Preserve detection of duplicate writes/submissions across endpoint aliases. Never change
+an explicit original HTTP contract or remove success, rejection or identity coverage.
+'''
+
+ORACLE_POLICY_VERSION = 2
 
 
 def require_acceptance(result):
@@ -101,7 +117,9 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
     verified_process = set()
     pending_verification = any(check['status'] == 'FAILED'
         for check in process_report.get('verification', {}).values())
-    report = {'status': 'RUNNING', 'requirements': {}}
+    previous = read_artifact(arc_dir, 'independent_acceptance.json') if (arc_dir / 'independent_acceptance.json').is_file() else {}
+    report = {'status': 'RUNNING', 'requirements': {
+        rid: {'status': 'PENDING', 'test_path': acceptance_path(rid)} for rid in tree.leaves}}
     save_json(arc_dir / 'independent_acceptance.json', report)
     for rid in tree.leaves:
         path = acceptance_path(rid)
@@ -117,16 +135,13 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
             task = {'original_requirement': requirement_context(tree, rid), 'test_path': path,
                 'ui_interfaces': {pid: {key: page[key] for key in ('route', 'root', 'elements')}
                     for pid, page in context['page_subtrees'].items()},
-                'api_interfaces': {aid: {key: value for key, value in api.items()
-                    if key in ('signature', 'request', 'response')} for aid, api in apis.items()},
                 'schema': related_schema(schema, apis.values())}
             if not task['ui_interfaces']:
                 entry.update(status='FAILED', error='No UI interface available for independent requirement acceptance; not verified')
                 continue
-            task['shared_conventions'] = task_conventions(output, {'requirement': task['original_requirement']})
             workspace = FileTools.for_target(output, 'acceptance_test', rid, fixed_path=path,
-                references=[FIXTURE, 'backend/tests/support/context.ts'],
-                readable=[path, FIXTURE, 'backend/tests/support/context.ts'])
+                references=[FIXTURE, OBSERVATIONS, 'backend/tests/support/context.ts'],
+                readable=[path, FIXTURE, OBSERVATIONS, 'backend/tests/support/context.ts'])
 
             def compile_suite():
                 if not (output / path).is_file():
@@ -138,8 +153,17 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
 
             if not (output / path).is_file():
                 agent = run_file_agent(model, INSTRUCTIONS, task, workspace, compile_suite,
-                    max_turns, console, label + ' / Generation')
+                    max_turns, console, label + ' / Generation', include_conventions=False)
                 entry['generation_turns'] = agent['turns']
+            elif previous.get('requirements', {}).get(rid, {}).get('oracle_policy') != ORACLE_POLICY_VERSION:
+                # Existing suites may encode the old generated-URL oracle. Review
+                # them against the original requirement before application repair.
+                review = run_file_agent(model, REVIEW_INSTRUCTIONS, task, workspace, compile_suite,
+                    max_turns, console, label + ' / Policy review', include_conventions=False,
+                    feedback={'review_reason': 'acceptance_oracle_policy_changed',
+                        'policy_version': ORACLE_POLICY_VERSION})
+                entry['policy_review_turns'] = review['turns']
+            entry['oracle_policy'] = ORACLE_POLICY_VERSION
             result = checks.tests([path])
             entry["result"] = result
             try:
@@ -152,12 +176,13 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                 checkpoint(output, stage="12", task=rid, action="Record independent acceptance before test review",
                     status="FAILED", details={"test_path": path, "checks": result})
                 review = run_file_agent(model, REVIEW_INSTRUCTIONS, task, workspace, compile_suite,
-                    max_turns, console, label + ' / Test review', feedback=result)
+                    max_turns, console, label + ' / Test review', feedback=result, include_conventions=False)
                 entry['review_turns'] = review['turns']
                 result = checks.tests([path])
                 entry["result"] = result
             if test_run_status(result) != 'GREEN' or pending_verification:
                 entry['status'] = 'REPAIRING'
+                save_json(arc_dir / 'independent_acceptance.json', report)
                 process_ids = [key for key, value in process_report['requirements'].items()
                     if pending_verification or value.get('status') == 'GREEN' or key == rid]
                 process_files = [test_path(key, output) for key in process_ids
@@ -173,7 +198,7 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                         'app': 'backend/src/app.ts', 'server': 'backend/src/server.ts'}}
                 repair_workspace = selection.workspace(
                     paths=selection.paths('page', context['page_subtrees']),
-                    references=[path, *ui_files, FIXTURE, 'frontend/src/ui-runtime.ts',
+                    references=[path, *ui_files, FIXTURE, OBSERVATIONS, 'frontend/src/ui-runtime.ts',
                         *APPLICATION_ENTRYPOINTS, 'frontend/package.json', 'frontend/tsconfig.json'])
                 repair_workspace.allow_write = lambda relative: editable_runtime_path(output, relative)
                 backend_selection.include(repair_workspace, backend_selection.paths('api', aids))

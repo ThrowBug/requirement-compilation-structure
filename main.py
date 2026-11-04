@@ -7,6 +7,7 @@ import sys
 from infrastructure.compiler import Compiler
 from infrastructure.utils.cli import resolve_directories
 from infrastructure.utils.presentation.logging import configure_console
+from infrastructure.shared.agent.experiments import OptimizationOptions
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -20,8 +21,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Show detailed model I/O and save per-call prompt/response logs; usage and timing are always shown")
     parser.add_argument("--port", type=int, default=3000,
         help="Default generated backend port and frontend API proxy target (default: 3000)")
+    parser.add_argument("--resume", action="store_true", help="Reuse version-checked completed stages and validated design proposals")
+    parser.add_argument("--resume-preview", action="store_true", help="Write .arc/resume-plan.json without running stages")
+    parser.add_argument("--changed-node", action="append", default=[], help="Explicit dependency node to invalidate (repeatable)")
+    dedup = parser.add_mutually_exclusive_group()
+    dedup.add_argument("--context-dedup", action="store_true", help="Experimentally encode repeated evidence as JSON Pointer references")
+    dedup.add_argument("--no-context-dedup", action="store_true", help="Keep literal evidence (default; retained for existing commands)")
+    parser.add_argument("--experimental-max-task-calls", type=int)
+    parser.add_argument("--experimental-max-read-characters", type=int)
+    parser.add_argument("--experimental-small-model")
+    parser.add_argument("--experimental-small-model-task", action="append", default=[])
+    parser.add_argument("--experimental-cache-dir", type=Path)
+    parser.add_argument("--experimental-deterministic-schema", type=Path, help="Reviewed per-requirement simple schema proposals, keyed by requirement ID")
+    parser.add_argument("--experimental-failure-advice", action="store_true")
     args = parser.parse_args(argv)
     try:
+        args.optimizations = OptimizationOptions(context_dedup=args.context_dedup,
+            max_task_calls=args.experimental_max_task_calls,
+            max_read_characters=args.experimental_max_read_characters,
+            small_model=args.experimental_small_model, small_model_tasks=tuple(args.experimental_small_model_task),
+            cache_dir=str(args.experimental_cache_dir.resolve()) if args.experimental_cache_dir else None,
+            deterministic_schema=str(args.experimental_deterministic_schema.resolve()) if args.experimental_deterministic_schema else None,
+            failure_advice=args.experimental_failure_advice)
+        if args.experimental_deterministic_schema and not args.experimental_deterministic_schema.is_file():
+            raise ValueError("Deterministic schema proposal file does not exist")
         if not 1 <= args.port <= 65535:
             raise ValueError("--port must be between 1 and 65535")
         args.requirement_path, args.output_dir = resolve_directories(
@@ -40,7 +63,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     configure_console()
     args = parse_args(argv)
-    compiler = Compiler(args.requirement_path, args.output_dir, model_log=args.model_log, port=args.port)
+    options = {}
+    if args.resume or args.resume_preview or args.changed_node:
+        options.update(resume=args.resume, resume_preview=args.resume_preview, changed_nodes=args.changed_node)
+    if args.optimizations != OptimizationOptions():
+        options["optimizations"] = args.optimizations
+    compiler = Compiler(args.requirement_path, args.output_dir, model_log=args.model_log, port=args.port, **options)
     try:
         compiler.compile()
     except KeyboardInterrupt:

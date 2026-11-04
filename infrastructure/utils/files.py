@@ -30,6 +30,11 @@ def save_bytes(path: Path, content: bytes) -> None:
 
 def save_json(path: Path, value: dict) -> None:
     """Publish indented UTF-8 JSON with LF line endings and no retained temporary file."""
+    from infrastructure.shared.artifacts.dependency_graph import ARTIFACTS, current_graph
+    graph = current_graph()
+    if graph is not None and path.parent == graph.output / ".arc" and path.name in ARTIFACTS:
+        graph.publish(path, value)
+        return
     save_text(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
 
 
@@ -41,6 +46,10 @@ def save_text(path: Path, content: str) -> None:
 def read_artifact(arc_dir: Path, filename: str) -> dict:
     """Load required UTF-8 JSON, accepting the BOM sometimes added by Windows editors."""
     path = arc_dir / filename
+    from infrastructure.shared.artifacts.dependency_graph import current_graph
+    if graph := current_graph():
+        if arc_dir == graph.output / ".arc":
+            graph.observe_read(filename)
     if not path.is_file():
         raise ValueError(f"Missing .arc/{filename}; run the preceding compilation step first")
     return json.loads(path.read_text(encoding="utf-8-sig"))

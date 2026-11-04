@@ -37,7 +37,7 @@ class StressTest(unittest.TestCase):
             output = self.root / str(index)
             initialize_project(output, port=port)
             initialize_project(output)
-            prepare_runtime(output, {})
+            prepare_runtime(output)
             prepare_frontend(output)
             self.assertIn(f'process.env.PORT ?? "{port}"', (output / 'backend/src/server.ts').read_text())
             self.assertIn(f'http://127.0.0.1:{port}', (output / 'frontend/vite.config.ts').read_text())

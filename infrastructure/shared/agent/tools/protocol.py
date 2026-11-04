@@ -23,6 +23,11 @@ Create a new file:
 Append to an existing file:
 {"tool_calls":[{"tool":"edit_file","path":"backend/src/example.ts",
 "operation":"append","new_content":"\\n// Additional implementation\\n"}]}.
+Claim a target file that an earlier task already created:
+{"tool_calls":[{"tool":"bind_target","path":"frontend/src/pages/Register.tsx"}]}.
+Binding registers the current target without changing its contents. It still runs acceptance.
+If task.file_target.path is null and the implementation already exists, bind it explicitly;
+editing an unrelated helper does not bind a target. Bindings and edits can share one batch.
 Use read_file calls when evidence is missing, and edit_file calls when ready to change code.
 The compiler executes calls and returns tool_results; tools are not prose instructions.
 Do not return legacy edits/content proposals, shell commands, Markdown or OS-specific paths.
@@ -55,14 +60,16 @@ edit_file is the only source-writing tool:
 - replace: old_content is nonempty and occurs exactly once. Copy it exactly from supplied
   content or read_file, including whitespace/newlines. new_content replaces that span;
   empty new_content deletes that local span only when correcting the relevant behavior.
-  Whole-file replacement is forbidden. Expand matching context only to make it unique.
+  Use a local span; whole-file replacement is allowed only for a tiny file/stub of at
+  most 160 non-edge-whitespace characters. Larger files require a smaller span.
+  Expand matching context only to make it unique.
 - prepend/append: insert new_content at an existing file boundary, preserving everything else.
 For create/prepend/append, omit old_content or use an empty string. Include needed newlines.
 A fragment read is sufficient for a unique replacement; no full-file read is required.
 Never overwrite existing files through create or guess old_content. Preserve unrelated code.
 
 Task.file_target describes the primary output directory/path and expected ownership.
-Create that target before new helpers. Choose a meaningful path inside its directory
+Create or bind that target before new helpers. Choose a meaningful path inside its directory
 when path is null. Use an existing path when supplied. Required test/SQL destinations may
 be adapted by the compiler; tool results report the actual path. Use that actual path in
 later calls and relative imports; do not keep retrying the originally requested location.
@@ -74,6 +81,8 @@ previous staged result, and the batch is published only if all calls succeed. Re
 form a separate batch so you can inspect their results before editing. Edits are followed
 by the stage's real compilation/tests; passing tools do not mean the task passed.
 An empty tool_calls list runs acceptance checks; it cannot finish a missing target.
+When allowed_read_paths is present, read_file is restricted to that list; use the supplied
+requirement and interface evidence for other facts, rather than retrying protected paths.
 After a failed check, edits remain available for repair. Tool errors explain failed exact
 matches, paths and destinations; inspect only needed evidence and retry.
 Earlier compilation/test failures remain unresolved until checks run again. A tool-call

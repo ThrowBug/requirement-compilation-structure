@@ -20,6 +20,7 @@ class FileTools:
         self.target, self.allow_write = target, allow_write
         self.readable = set(readable) if readable is not None else None
         self.changed_paths, self.last_changes = set(), []
+        self.observed_paths = set()
         self._pending, self._target_path = {}, None
         for path in self.files:
             self.path(path)
@@ -72,7 +73,7 @@ class FileTools:
                     call_index=number, examples=[item[1]["example"] for item in TOOL_REGISTRY.values()])
             name = call["tool"]
             if name not in TOOL_REGISTRY:
-                raise FileToolError("UNKNOWN_TOOL", f"Unknown tool {name!r}; use read_file or edit_file",
+                raise FileToolError("UNKNOWN_TOOL", f"Unknown tool {name!r}; use a declared tool",
                     call_index=number, tool=name, available_tools=list(TOOL_REGISTRY))
             schema = TOOL_REGISTRY[name][1]
             parameters = schema["parameters"]
@@ -108,6 +109,8 @@ class FileTools:
         results, originals, written = [], {}, []
         index_path = self.output / ".arc/implementation_paths.json"
         index_before = index_path.read_bytes() if index_path.is_file() else None
+        target_before = self.target.path if self.target else None
+        files_before, writable_before = set(self.files), set(self.writable)
         try:
             for number, call in enumerate(calls, 1):
                 name = call["tool"]
@@ -143,11 +146,13 @@ class FileTools:
                     target.unlink(missing_ok=True)
                 else:
                     save_bytes(target, originals[path])
-            if written and self._target_path is not None:
+            if self._target_path is not None:
                 if index_before is None:
                     index_path.unlink(missing_ok=True)
                 else:
                     save_bytes(index_path, index_before)
+                self.target.path = target_before
+                self.files, self.writable = files_before, writable_before
             self.last_changes = []
             raise
         finally:

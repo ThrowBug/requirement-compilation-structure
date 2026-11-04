@@ -1,8 +1,17 @@
 """Workspace-relative file reading and exact local editing operations."""
 
+import json
 from infrastructure.shared.agent.files import EXCLUDED
 from infrastructure.utils.files import normalize_newlines, read_source
 from infrastructure.utils.paths import check_path_case, relative_path
+from infrastructure.shared.agent.context_broker import content_version
+from infrastructure.shared.agent.experiments import consume
+from infrastructure.shared.usage.recorder import record_event
+
+
+# A tiny single-function stub may itself be the only replaceable span. Larger
+# files require a local edit so previous implementations are not regenerated.
+SMALL_FILE_REPLACEMENT_LIMIT = 160
 
 
 class FileToolError(ValueError):
@@ -33,16 +42,48 @@ def read_file(files, path, start_line=1, end_line=None):
     """Read the requested lines only; reading never expands the pinned source context."""
     target = files.path(path)
     if files.readable is not None and path not in files.readable:
-        raise FileToolError("READ_NOT_ALLOWED", "This task cannot read this file", path)
+        raise FileToolError("READ_NOT_ALLOWED", "This task cannot read this file; use allowed_read_paths", path,
+            allowed_read_paths=sorted(files.readable))
     if not target.is_file():
         raise FileToolError("FILE_NOT_FOUND", "File does not exist; use edit_file/create for a new file", path)
     if type(start_line) is not int or start_line < 1 or (end_line is not None and
             (type(end_line) is not int or end_line < start_line)):
         raise FileToolError("INVALID_LINE_RANGE", "Use positive, inclusive line numbers", path)
-    lines = read_source(target).splitlines(keepends=True)
+    source = read_source(target)
+    lines = source.splitlines(keepends=True)
     last = min(end_line if end_line is not None else len(lines), len(lines))
-    return {"path": path, "content": "".join(lines[start_line - 1:last]), "start_line": start_line,
+    content = "".join(lines[start_line - 1:last])
+    consume("read_characters", len(content))
+    record_event("read_file", path=path, characters=len(content))
+    files.observed_paths.add(path)
+    return {"path": path, "content": content, "start_line": start_line, "version": content_version(source),
         "end_line": last, "total_lines": len(lines), "writable": files.can_write(path)}
+
+
+def bind_target(files, path):
+    """Explicitly claim an existing writable output; publish with the whole batch."""
+    target = files.path(path)
+    declaration = files.target
+    if declaration is None:
+        raise FileToolError("NO_TASK_TARGET", "This task has no target to bind", path)
+    if (declaration.path is not None and path != declaration.path) or (
+            files._target_path is not None and path != files._target_path):
+        raise FileToolError("TARGET_PATH_MISMATCH", "Preserve this task's declared target path", path)
+    if not path.startswith(declaration.directory + "/") or declaration.adapt(path) != path:
+        raise FileToolError("TARGET_PATH_MISMATCH", "Use a target inside its declared directory with the required suffix", path)
+    if not files.can_write(path):
+        raise FileToolError("WRITE_NOT_ALLOWED", "Binding cannot grant access to a protected file", path)
+    if files.readable is not None and path not in files.readable:
+        raise FileToolError("READ_NOT_ALLOWED", "Binding cannot bypass the readable scope", path,
+            allowed_read_paths=sorted(files.readable))
+    if not target.is_file() and path not in files._pending:
+        raise FileToolError("FILE_NOT_FOUND", "Create a missing target with edit_file/create", path)
+    index = files.output / ".arc/implementation_paths.json"
+    owners = json.loads(index.read_text(encoding="utf-8-sig")).get(declaration.kind, {}) if index.is_file() else {}
+    if any(identity != declaration.identity and owned == path for identity, owned in owners.items()):
+        raise FileToolError("TARGET_ALREADY_OWNED", "Another target of this kind already owns this path", path)
+    files._target_path = path
+    return {"path": path, "target_kind": declaration.kind, "target_id": declaration.identity}
 
 
 def edit_file(files, path, operation, new_content, old_content=""):
@@ -72,9 +113,10 @@ def edit_file(files, path, operation, new_content, old_content=""):
         if operation == "replace":
             if not old_content:
                 raise FileToolError("INVALID_ARGUMENTS", "replace requires nonempty exact old_content", path)
-            if current.strip() and old_content.strip() == current.strip():
+            if len(current.strip()) > SMALL_FILE_REPLACEMENT_LIMIT and current.strip() == old_content.strip():
                 raise FileToolError("WHOLE_FILE_REPLACEMENT_NOT_ALLOWED",
-                    "Incremental compilation forbids replacing a whole existing file. "
+                    "Incremental compilation forbids replacing a whole existing file over "
+                    f"{SMALL_FILE_REPLACEMENT_LIMIT} characters. "
                     "Use a smaller unique span and preserve earlier requirements, registrations and state.", path)
             first = current.find(old_content)
             count = 0 if first < 0 else (2 if current.find(old_content, first + 1) >= 0 else 1)

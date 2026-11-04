@@ -11,6 +11,7 @@ IGNORE_RULES = (
     "backend/data/", "*.db", "*.db-wal", "*.db-shm", "*.sqlite", "*.sqlite3",
     ".env", ".env.*", "!.env.example", "compiler.log", "model_calls.jsonl", ".arc/model_logs/",
     "__pycache__/", ".venv/",
+    ".arc/usage/", ".arc/resume.json", ".arc/resume-plan.json",
 )
 
 

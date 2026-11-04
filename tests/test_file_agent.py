@@ -11,9 +11,8 @@ from infrastructure.shared.agent.files import source_paths, editable_sources
 from infrastructure.shared.agent.loop import run_file_agent
 from infrastructure.shared.project.entrypoints import remember_path, selected_path
 from infrastructure.shared.project.initialize import initialize_project
-from infrastructure.stages.backend.runtime import prepare_runtime, sync_implementations
-from infrastructure.stages.frontend.ui.runtime import prepare_frontend, sync_pages
-from infrastructure.stages.frontend.triggers.runtime import sync_triggers
+from infrastructure.stages.backend.runtime import prepare_runtime
+from infrastructure.stages.frontend.ui.runtime import prepare_frontend
 from infrastructure.utils.files import read_source, save_text
 
 
@@ -92,7 +91,7 @@ class FileAgentTests(unittest.TestCase):
     def test_fixed_paths_and_runtime_registration_need_no_index(self):
         initialize_project(self.root)
         api = {"API-EXAMPLE": {"signature": {"name": "example", "method": "GET", "path": "/api/example"}}}
-        prepare_runtime(self.root, api)
+        prepare_runtime(self.root)
         initial_registry = read_source(self.root / "backend/src/api/register.ts")
         self.assertIn("registerApis", initial_registry)
         self.assertNotIn("/api/example", initial_registry)
@@ -104,18 +103,7 @@ class FileAgentTests(unittest.TestCase):
         save_text(self.root / event_path, "export function handle() {}")
         for kind, identity, path in (("api", "API-EXAMPLE", api_path), ("page", "PAGE-EXAMPLE", page_path), ("trigger", "EVENT-EXAMPLE", event_path)):
             remember_path(self.root, kind, identity, path)
-        sync_implementations(self.root, api)
         self.assertEqual(read_source(self.root / "backend/src/api/register.ts"), initial_registry)
-        self.assertIn("handle as example", read_source(self.root / "backend/tests/support/apis.ts"))
-        ui = {"pages": {"PAGE-EXAMPLE": {"route": "/", "root": "UI-ROOT"}}, "bindings": {}, "elements": {}}
-        prepare_frontend(self.root)
-        sync_pages(self.root, ui)
-        self.assertIn("Page as Page0", read_source(self.root / "frontend/src/App.tsx"))
-        interactions = {"triggers": {"EVENT-EXAMPLE": {"source": "UI-ROOT", "event": "mount", "action": [], "read": [], "write": []}}}
-        sync_triggers(self.root, ui, interactions, {"apis": api}, [])
-        self.assertNotIn("handle as trigger0", read_source(self.root / "frontend/src/ui-triggers.ts"))
-        sync_triggers(self.root, ui, interactions, {"apis": api}, ["EVENT-EXAMPLE"])
-        self.assertIn("handle as trigger0", read_source(self.root / "frontend/src/ui-triggers.ts"))
         self.assertFalse((self.root / ".arc/file_index.json").exists())
 
 
@@ -205,7 +193,7 @@ class FileAgentTests(unittest.TestCase):
         first = model.generate_json.call_args_list[0].args[1]
         self.assertTrue(first["files"][page]["writable"])
         self.assertFalse(first["files"]["frontend/src/ui-runtime.ts"]["writable"])
-        self.assertFalse(first["files"]["frontend/src/App.tsx"]["writable"])
+        self.assertFalse(first["files"]["frontend/src/ui-runtime.ts"]["writable"])
         self.assertFalse(first["files"][previous]["writable"])
         self.assertEqual(result["turns"], 2)
         self.assertEqual(read_source(self.root / previous), "accepted assertions")
@@ -239,7 +227,7 @@ class FileAgentTests(unittest.TestCase):
     def test_custom_paths_are_registered_for_backend_pages_and_events(self):
         initialize_project(self.root)
         api = {"API-CUSTOM": {"signature": {"name": "custom", "method": "GET", "path": "/api/custom"}}}
-        prepare_runtime(self.root, api)
+        prepare_runtime(self.root)
         paths = {"api": ("API-CUSTOM", "backend/src/features/account/read.ts", "export async function handle() {}"),
             "page": ("PAGE-CUSTOM", "frontend/src/screens/account.tsx", "export function Page() {}"),
             "trigger": ("TR-CUSTOM", "frontend/src/behavior/account/load.ts", "export function handle() {}")}
@@ -247,15 +235,6 @@ class FileAgentTests(unittest.TestCase):
             workspace = FileTools.for_target(self.root, kind, identity)
             workspace.state()
             workspace.execute(propose_files(self.root, [{"path": path, "content": content}])["tool_calls"])
-        sync_implementations(self.root, api)
-        self.assertIn("../../src/features/account/read.js", read_source(self.root / "backend/tests/support/apis.ts"))
-        ui = {"pages": {"PAGE-CUSTOM": {"route": "/", "root": "UI-ROOT"}}, "bindings": {}, "elements": {}}
-        prepare_frontend(self.root)
-        sync_pages(self.root, ui)
-        self.assertIn("./screens/account", read_source(self.root / "frontend/src/App.tsx"))
-        interactions = {"triggers": {"TR-CUSTOM": {"source": "UI-ROOT", "event": "mount", "action": [], "write": [], "read": []}}}
-        sync_triggers(self.root, ui, interactions, {"apis": api}, ["TR-CUSTOM"])
-        self.assertIn("./behavior/account/load", read_source(self.root / "frontend/src/ui-triggers.ts"))
 
     def test_model_wiring_survives_preparation_and_acceptance_refreshes(self):
         from infrastructure.shared.agent.context import SourceFiles
@@ -263,23 +242,21 @@ class FileAgentTests(unittest.TestCase):
         registry, client = "backend/src/api/register.ts", "frontend/src/ui-api.ts"
         handler = "backend/src/features/other.ts"
         save_text(self.root / handler, "export const largeUnrelatedImplementation = 1;")
-        source = 'import "../features/other.js";\n// Model-maintained routes\n'
+        anchor = '// API implementation tasks maintain this registry and preserve existing routes.'
+        source = 'import "../features/other.js"; ' + anchor
         backend = SourceFiles(self.root, root="backend/src", tests_root="backend/tests")
         workspace = backend.workspace(paths=[registry])
         workspace.state()
-        workspace.execute(propose_files(self.root, [{"path": registry, "content": source}])["tool_calls"])
+        workspace.execute(propose_files(self.root, [{"path": registry, "content": source, "old_content": anchor}])["tool_calls"])
         # Reading the shared registry must not bring every registered handler into context.
         queried = backend.workspace(paths=[registry])
         self.assertNotIn(handler, queried.files)
-        prepare_runtime(self.root, {})
-        sync_implementations(self.root, {})
-        self.assertEqual(read_source(self.root / registry), source)
+        prepare_runtime(self.root)
+        self.assertIn("import \"../features/other.js\";", read_source(self.root / registry))
         empty_ui = {"pages": {}, "bindings": {}, "elements": {}}
-        sync_triggers(self.root, empty_ui, {"triggers": {}}, {"apis": {}}, [])
         frontend = SourceFiles(self.root).workspace(paths=[client])
         frontend.state()
         frontend.execute(propose_files(self.root, [{"path": client, "content": "// Model-maintained HTTP calls"}])["tool_calls"])
-        sync_triggers(self.root, empty_ui, {"triggers": {}}, {"apis": {}}, [])
         self.assertEqual(read_source(self.root / client), "// Model-maintained HTTP calls")
 
     def test_new_test_file_paths_are_chosen_by_model(self):

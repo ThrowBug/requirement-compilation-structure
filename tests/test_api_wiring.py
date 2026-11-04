@@ -12,8 +12,7 @@ from unittest.mock import Mock
 from infrastructure.shared.agent.context import SourceFiles
 from infrastructure.shared.agent.loop import run_file_agent
 from infrastructure.shared.project.initialize import initialize_project
-from infrastructure.stages.backend.runtime import prepare_runtime, sync_implementations
-from infrastructure.stages.frontend.triggers.runtime import sync_triggers
+from infrastructure.stages.backend.runtime import prepare_runtime
 from infrastructure.utils.files import save_text
 
 
@@ -27,8 +26,7 @@ class ApiWiring(unittest.TestCase):
             registry = 'backend/src/api/register.ts'
             client = 'frontend/src/ui-api.ts'
             handler = 'backend/src/books/read.ts'
-            apis = {'API-READ': {'signature': {'name': 'readBook', 'method': 'GET', 'path': '/api/books/{bookId}'}}}
-            prepare_runtime(output, apis)
+            prepare_runtime(output)
             implementation = '''import type Database from 'better-sqlite3';
 import type { ApiRequest, ApiResponse } from '../api/types.js';
 export async function handle(request: ApiRequest, db: Database.Database): Promise<ApiResponse> {
@@ -55,9 +53,8 @@ export function registerApis(app: Express, db: Database.Database) {
             response = propose_files(output, [{'path': handler, 'content': implementation}, {'path': registry, 'content': wiring}])
             run_file_agent(Mock(generate_json=Mock(return_value=response)), '', {}, workspace,
                 Mock(return_value={}), 1, Mock(), 'Backend wiring')
-            ui = {'pages': {'PAGE-BOOKS': {'route': '/', 'root': 'UI-BOOKS'}}, 'elements': {}, 'bindings': {}}
-            sync_triggers(output, ui, {'triggers': {}}, {'apis': apis}, [])
-            client_source = '''import type { UiApiRequest, UiApiResponse } from './ui-runtime';
+            client_source = '''interface UiApiRequest { params?: Record<string, unknown> }
+interface UiApiResponse { status: number; body: unknown; headers: Record<string, string> }
 export async function callApi(id: string, request: UiApiRequest = {}): Promise<UiApiResponse> {
   if (id !== 'API-READ') throw new Error('Unknown API');
   const url = new URL('/api/books/' + encodeURIComponent(String(request.params?.bookId)), window.location.origin);
@@ -69,9 +66,7 @@ export async function callApi(id: string, request: UiApiRequest = {}): Promise<U
             run_file_agent(Mock(generate_json=Mock(return_value=propose_files(output, [{'path': client, 'content': client_source}]))),
                 '', {}, workspace, Mock(return_value={}), 1, Mock(), 'Frontend wiring')
             # The compiler must preserve both ends, including when preparation is repeated.
-            prepare_runtime(output, apis)
-            sync_implementations(output, apis)
-            sync_triggers(output, ui, {'triggers': {}}, {'apis': apis}, [])
+            prepare_runtime(output)
             for layer in ('backend', 'frontend'):
                 compiled = subprocess.run(['node', 'node_modules/typescript/bin/tsc',
                     '-p', layer + '/tsconfig.json', '--noEmit'], cwd=output,

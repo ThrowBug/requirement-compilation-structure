@@ -8,13 +8,14 @@ from unittest.mock import Mock, patch
 
 from infrastructure.shared.agent.context import SourceFiles
 from infrastructure.shared.agent.loop import run_file_agent
-from infrastructure.shared.agent.tools import FileTools, FileToolError, TOOL_REGISTRY, definition
+from infrastructure.shared.agent.tools import FileTools, FileToolError, TOOL_REGISTRY
+from infrastructure.shared.agent.tools.schemas import definition
 from infrastructure.shared.project.entrypoints import selected_path
 from infrastructure.utils.files import save_text
 
 
 def call(tool, **arguments):
-    return {"tool": tool, "arguments": arguments}
+    return {"tool": tool, **arguments}
 
 
 class FileToolTests(unittest.TestCase):
@@ -63,6 +64,22 @@ class FileToolTests(unittest.TestCase):
         with self.assertRaises(FileToolError) as failed:
             tools.execute([call("edit_file", path=path, operation="replace", old_content="aa", new_content="b")])
         self.assertEqual(failed.exception.feedback["code"], "OLD_CONTENT_NOT_UNIQUE")
+
+    def test_large_whole_file_replacement_is_rejected_while_small_stubs_can_be_repaired(self):
+        path = "backend/src/handler.ts"
+        source = "export function handle() {\n  return '" + "x" * 180 + "';\n}\n"
+        save_text(self.root / path, source)
+        tools = FileTools(self.root, [path])
+        with self.assertRaises(FileToolError) as failed:
+            tools.execute([call("edit_file", path=path, operation="replace",
+                old_content=source, new_content="export function handle() {}")])
+        self.assertEqual(failed.exception.feedback["code"], "WHOLE_FILE_REPLACEMENT_NOT_ALLOWED")
+        self.assertEqual((self.root / path).read_text(), source)
+        stub = "export function handle() { return 501; }"
+        save_text(self.root / path, stub)
+        tools.execute([call("edit_file", path=path, operation="replace", old_content=stub,
+            new_content="export function handle() { return 200; }")])
+        self.assertIn("return 200", (self.root / path).read_text())
 
     def test_test_suffix_is_adapted_before_path_registration(self):
         tools = FileTools.for_target(self.root, "e2e_test", "REQ-A")
@@ -125,7 +142,7 @@ class FileToolTests(unittest.TestCase):
 
     def test_registry_defines_the_model_schema_and_execution(self):
         tools = FileTools(self.root)
-        schema = {item["function"]["name"]: item["function"] for item in tools.schemas()}
+        schema = {item["tool"]: item for item in tools.schemas()}
         self.assertEqual(set(schema), set(TOOL_REGISTRY))
         self.assertIn("operation", schema["edit_file"]["parameters"]["required"])
         self.assertNotIn(str(self.root), json.dumps(tools.schemas()))
@@ -135,11 +152,14 @@ class FileToolTests(unittest.TestCase):
 
     def test_registered_read_tool_uses_the_shared_loop_without_a_new_dispatch_branch(self):
         entry = (lambda files: {"notice": "relevant evidence"},
-            definition("inspect_context", "Read task evidence", {}, []), "read")
+            definition("inspect_context", "Read task evidence", {}, [],
+            {"tool": "inspect_context"}), "read")
         model = Mock(generate_json=Mock(side_effect=[
             {"tool_calls": [call("inspect_context")]}, {"tool_calls": []}]))
+
         with patch.dict(TOOL_REGISTRY, {"inspect_context": entry}):
-            run_file_agent(model, "Use the shared tools", {}, FileTools(self.root),
+            result = run_file_agent(model, "Use the shared tools", {}, FileTools(self.root),
                 Mock(return_value={"green": True}), 1, Mock(), "extension")
+        self.assertEqual(result["checks"], {"green": True})
         payload = model.generate_json.call_args.args[1]
         self.assertEqual(payload["context_result"]["tool_results"][0]["result"], {"notice": "relevant evidence"})

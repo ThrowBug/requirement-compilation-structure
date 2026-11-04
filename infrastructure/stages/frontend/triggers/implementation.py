@@ -12,7 +12,7 @@ from infrastructure.shared.agent.recovery import implementation_task, final_chec
 from infrastructure.shared.agent.context import SourceFiles
 from infrastructure.shared.agent.discovery import project_index
 from infrastructure.shared.project.entrypoints import selected_path
-from infrastructure.stages.frontend.triggers.e2e_runtime import CONFIG, FIXTURE, prepare_e2e
+from infrastructure.stages.frontend.triggers.e2e_runtime import CONFIG, FIXTURE, OBSERVATIONS, prepare_e2e
 from infrastructure.stages.frontend.triggers.testing import E2EChecks, test_path
 from infrastructure.stages.frontend.ui.runtime import APPLICATION_ENTRYPOINTS, prepare_frontend
 from infrastructure.stages.frontend.ui.testing import FrontendChecks, require_green, test_path as ui_test_path
@@ -27,8 +27,9 @@ from infrastructure.shared.project.git import checkpoint
 
 
 def scenario_context(ui, design, rid):
-    """Reference this requirement's triggers and directly involved pages only."""
-    triggers = {tid: design["triggers"][tid] for tid in design["requirements"].get(rid, [])}
+    """Include direct behavior and page-entry dependencies without changing ownership."""
+    direct = set(design["requirements"].get(rid, []))
+    triggers = {tid: design["triggers"][tid] for tid in direct}
     elements = set(ui["requirements"].get(rid, []))
     for trigger in triggers.values():
         elements.add(trigger["source"])
@@ -39,7 +40,19 @@ def scenario_context(ui, design, rid):
     for pid in ui["pages"]:
         if elements.intersection(page_elements(ui, pid)):
             pages[pid] = page_context(ui, pid)
-    return {"page_subtrees": pages, "triggers": triggers}
+    while True:
+        page_ids = set(pages)
+        included = {uid for page in pages.values() for uid in page["elements"]}
+        selected = direct | {tid for tid, trigger in design["triggers"].items()
+            if trigger["event"] == "mount" and trigger["source"] in included}
+        triggers = {tid: design["triggers"][tid] for tid in sorted(selected)}
+        destinations = {action.get("ui") for trigger in triggers.values()
+            for action in trigger["action"] if action["kind"] == "ui"}
+        for pid, page in ui["pages"].items():
+            if page["root"] in destinations:
+                pages.setdefault(pid, page_context(ui, pid))
+        if set(pages) == page_ids:
+            return {"page_subtrees": pages, "triggers": triggers}
 
 
 def editable_runtime_path(output, path):
@@ -81,6 +94,13 @@ check the required business outcome. Count only that operation, not page-entry r
 unrelated calls, or retries/repeated operations explicitly required by the requirement.
 Install request observation before the action; synchronize with its response and visible
 completion. Do not add fixed sleeps or assert all application requests have count one.
+Generated API routes are implementation details unless the original requirement specifies
+them. A shared form may be refined by another requirement using another backend operation;
+do not pin an earlier smoke suite to a historical URL or force both submissions. Use the
+fixture's observeMutations around the action and visible business completion, matching the
+submitted business data across endpoints. Check required persistence and count one logical
+mutation; an alias request is still a second mutation request. Preserve explicit original
+HTTP contracts. Do not read an unspecified response body after full document navigation.
 
 Use edit_file to create the .spec.ts target under frontend/tests/e2e using task.file_target or update test_path. Import test and
 expect from frontend/tests/e2e/support/context.ts with a relative .js import. Tests use
@@ -162,7 +182,11 @@ reset/cancel and object switches must update the displayed controls. Do not rely
 automatic compiler input/change handler or require defaultValue/defaultChecked everywhere.
 
 Call the canonical backend interfaces with real HTTP, using existing request helpers or
-new shared application helpers as appropriate. Preserve previous API request cases.
+new shared application helpers as appropriate. Preserve previous APIs for their callers,
+and original behavior. When a shared control's workflow is extended, submit the operation
+appropriate to its current input once; never call old and new endpoints for the same action
+just to satisfy generated URL-specific tests. Diagnose such a test against the original
+requirement and correct its transport assumption while retaining its business assertions.
 Respect response status/body/headers, empty bodies and browser-managed cookies. Do not
 manually set browser Cookie headers or read HttpOnly credentials. Register event handling
 only once; preserve action ordering, guards, rejection behavior and failure-without-writes.
@@ -190,6 +214,8 @@ writable according to tools; original designs and shared test tools remain refer
 When startup evidence points into existing database runtime/SQL, repair those files too.
 Preserve the declared schema, constraints, previous tables and requirement-defined seed
 data; correct their executable implementation rather than removing required guarantees.
+Complete response processing before a full document navigation; prefer framework routing
+for an in-application route change so pending response processing is not interrupted.
 Correct a generated test only with original requirement evidence, preserving valid coverage.
 The gate compiles and runs current/accepted browser scenarios, affected backend HTTP suites,
 UI presence regression and final builds. Return ordinary edit_file calls; no path metadata
@@ -284,7 +310,7 @@ def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts
             report["requirements"][rid] = {"status": "NO_TRIGGERS", "triggers": []}
             save_json(arc_dir / "frontend_e2e.json", report)
             continue
-        targets = tids
+        targets = tids | (set(context["triggers"]) - implemented)
         relative = test_path(rid, output)
         ui_files = [ui_test_path(pid) for pid in pages if (output / ui_test_path(pid)).is_file()]
         called = {aid for trigger in context["triggers"].values() for aid in api_ids(trigger)}
@@ -320,7 +346,7 @@ def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts
             test_context = {**model_context(context), "schema": related_schema(schema, context["backend_apis"].values()), "test_path": relative if (output / relative).is_file() else None,
                 "max_tests": max_tests}
             test_workspace = selection.workspace(target=("e2e_test", rid), existing=relative,
-                references=["frontend/src/ui-runtime.ts", CONFIG, FIXTURE, "backend/tests/support/context.ts",
+                references=["frontend/src/ui-runtime.ts", CONFIG, FIXTURE, OBSERVATIONS, "backend/tests/support/context.ts",
                     *selection.paths("page", pages), *APPLICATION_ENTRYPOINTS,
                     "frontend/package.json", "frontend/tsconfig.json",
                     *backend_selection.paths("api", called),
@@ -367,6 +393,11 @@ def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts
                 """Require actual implementations, compilation and functional smoke results."""
                 result = implementation_checks()
                 try:
+                    missing = [path for tid, path in task["implementation_paths"].items()
+                        if not (output / path).is_file()]
+                    if missing:
+                        raise ValueError("Create all supplied trigger files before acceptance: "
+                            + ", ".join(missing))
                     for kind in ("typecheck", "backend_typecheck"):
                         if result.get(kind) and result[kind]["returncode"]:
                             raise ValueError(result[kind]["output"])
@@ -377,7 +408,7 @@ def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts
                     if "ui" in result:
                         require_green(result["ui"])
                 except ValueError as error:
-                    raise TriggerCheckFailure("Functional integration or compilation failed", result) from error
+                    raise TriggerCheckFailure("Functional integration or compilation failed: " + str(error), result) from error
                 return result
 
             generated = agent["checks"]
@@ -389,6 +420,8 @@ def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts
             report["requirements"][rid]["status"] = "IMPLEMENTING"
             task = {**model_context(context),
                 "application_entrypoints": list(APPLICATION_ENTRYPOINTS),
+                "implementation_paths": {tid: (selected_path(output, "trigger", tid)
+                    or f"frontend/src/triggers/{tid}.ts") for tid in targets},
                 "backend_entrypoints": {"registry": "backend/src/api/register.ts",
                     "app": "backend/src/app.ts", "server": "backend/src/server.ts"}}
             workspace = selection.workspace(paths=[*selection.paths("page", pages), "frontend/src/style.css"],

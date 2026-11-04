@@ -144,9 +144,12 @@ class ImplementationRecovery(unittest.TestCase):
             compiled = {'returncode': 0, 'output': 'compiled'}
             def run(model, instructions, task, files, gate, max_turns, console, label, **kwargs):
                 rid = task['requirement']['id']
-                calls.append((rid, 'implementation' if 'implementation_paths' in task else 'tests'))
-                if 'implementation_paths' in task:
-                    for path in task['implementation_paths'].values():
+                implementation_task = bool(task.get('implementation_paths'))
+                calls.append((rid, 'implementation' if implementation_task else 'tests'))
+                if implementation_task:
+                    for eid in task['target_trigger_ids']:
+                        path = f'frontend/src/triggers/{eid}.ts'
+                        remember_path(root, 'trigger', eid, path)
                         save_text(root / path, 'rejected' if rid == 'REQ-A' else 'accepted')
                     if rid == 'REQ-A':
                         raise AgentExhausted(label, 1, [{'error': 'Integration failure'}])
@@ -154,7 +157,12 @@ class ImplementationRecovery(unittest.TestCase):
                 path = f'frontend/tests/e2e/{rid}.spec.ts'
                 remember_path(root, 'e2e_test', rid, path)
                 save_text(root / path, 'assertions')
-                return {'turns': 1, 'checks': {'typecheck': compiled, 'behavior': green, 'status': 'GREEN'}}
+                if rid != 'REQ-A':
+                    for eid in task['target_trigger_ids']:
+                        trigger_path = f'frontend/src/triggers/{eid}.ts'
+                        remember_path(root, 'trigger', eid, trigger_path)
+                        save_text(root / trigger_path, 'accepted')
+                return {'turns': 1, 'checks': {'typecheck': compiled, 'behavior': green, 'status': 'REPAIR_REQUIRED'}}
             checks, api_checks = Mock(), Mock()
             checks.typecheck.return_value = compiled
             checks.tests.return_value = green

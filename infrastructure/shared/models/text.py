@@ -7,6 +7,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI, OpenAIError
 from infrastructure.utils.presentation.model_io import http_client, invoke
+from infrastructure.shared.agent.context_broker import compact_json, has_context_marker, intern_context, REFERENCE_RULES
+from infrastructure.shared.agent.experiments import options, ResponseCache
+from infrastructure.shared.usage.recorder import current_scope, record_event
 
 
 DEFAULT_MODEL = "deepseek-flash"
@@ -74,22 +77,33 @@ class TextModel:
 
     def _request(self, **arguments):
         """Apply one output budget to JSON calls, with legacy endpoint compatibility."""
+        name = arguments.get("model", self.name)
+        if not hasattr(self, "_model_capabilities"):
+            self._model_capabilities = {}
+        primary = name == self.name
+        capability = self._model_capabilities.setdefault(name, {
+            "token_parameter": getattr(self, "_token_parameter", "max_completion_tokens") if primary else "max_completion_tokens",
+            "reasoning_supported": getattr(self, "_reasoning_supported", True) if primary else True})
         while True:
             options = dict(arguments)
-            if not getattr(self, "_reasoning_supported", True):
+            if not capability["reasoning_supported"]:
                 options.pop("reasoning_effort", None)
                 options.pop("extra_body", None)
             try:
-                return invoke(self.client, {**options, self._token_parameter: self.max_output_tokens})
+                return invoke(self.client, {**options, capability["token_parameter"]: self.max_output_tokens})
             except OpenAIError as error:
                 message = str(error).lower()
                 rejected = getattr(error, "status_code", None) in {400, 422} and any(
                     word in message for word in ("unsupported", "unknown", "unrecognized", "not supported", "not allowed", "unexpected"))
-                if rejected and self._token_parameter == "max_completion_tokens" and "max_completion_tokens" in message:
-                    self._token_parameter = "max_tokens"
+                if rejected and capability["token_parameter"] == "max_completion_tokens" and "max_completion_tokens" in message:
+                    capability["token_parameter"] = "max_tokens"
+                    if primary:
+                        self._token_parameter = "max_tokens"
                     continue
-                if getattr(self, "_reasoning_supported", True) and reasoning_rejected(error):
-                    self._reasoning_supported = False
+                if capability["reasoning_supported"] and reasoning_rejected(error):
+                    capability["reasoning_supported"] = False
+                    if primary:
+                        self._reasoning_supported = False
                     print("Provider rejected reasoning controls; using provider defaults.", flush=True)
                     continue
                 raise
@@ -97,15 +111,38 @@ class TextModel:
     def generate_json(self, instructions: str, payload: dict) -> dict:
         """Request JSON using the stage prompt and serialized task data."""
         mode = getattr(self, "reasoning", "low")
+        policy = options()
+        model_name = (policy.small_model if current_scope().get("task") in policy.small_model_tasks else None) or self.name
+        compact = intern_context(payload) if policy.context_dedup else payload
+        protocol = JSON_OUTPUT_RULE
+        if has_context_marker(payload):
+            protocol += (
+                "\nContext reference encoding is disabled for this input; $context_ref keys are literal user data.")
+        elif has_context_marker(compact):
+            protocol += "\n" + REFERENCE_RULES
+        system_prompt = instructions.rstrip() + "\n" + protocol
+        record_event("serialized_context", original_characters=len(compact_json(payload)),
+            sent_characters=len(compact_json(compact)), dedup=policy.context_dedup)
+        cache = ResponseCache(policy.cache_dir) if policy.cache_dir else None
+        cache_key = cache.key(model=model_name, endpoint=str(getattr(self.client, "base_url", "")),
+            instructions=system_prompt, payload=compact, reasoning=mode,
+            json_mode=getattr(self, "json_mode", True), output_limit=self.max_output_tokens) if cache else None
+        self._pending_cache = None
+        if cache:
+            cached = cache.get(cache_key)
+            if cached is not None:
+                self._pending_cache = (cache, cache_key, cached)
+                record_event("response_cache_hit")
+                return cached
         try:
             response = self._request(
-                model=self.name,
+                model=model_name,
                 messages=[
-                    {"role": "system", "content": instructions.rstrip() + "\n" + JSON_OUTPUT_RULE},
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": compact_json(compact)},
                 ],
                 **({"response_format": {"type": "json_object"}} if getattr(self, "json_mode", True) else {}),
-                **reasoning_arguments(self.name, mode),
+                **reasoning_arguments(model_name, mode),
             )
         except OpenAIError as error:
             raise RuntimeError(f"Text model request failed: {error}") from error
@@ -120,4 +157,24 @@ class TextModel:
         if not response.choices or not response.choices[0].message.content:
             raise ValueError("Text model returned empty content")
         content = response.choices[0].message.content.strip()
-        return json.loads(content)
+        result = json.loads(content)
+        if not isinstance(result, dict):
+            raise ValueError("Text model must return a JSON object")
+        if cache:
+            self._pending_cache = (cache, cache_key, result)
+        return result
+
+    def accept_response(self):
+        if pending := getattr(self, "_pending_cache", None):
+            cache, key, response = pending
+            cache.put(key, response)
+            self._pending_cache = None
+
+    def reject_response(self):
+        if pending := getattr(self, "_pending_cache", None):
+            cache, key, _ = pending
+            try:
+                (cache.directory / (key + ".json")).unlink(missing_ok=True)
+            except OSError:
+                pass
+            self._pending_cache = None

@@ -96,7 +96,9 @@ def console_log(output_dir: Path, *, debug_model_io: bool = False, model_log: bo
             outcome, failure = "COMPLETED", None
             checkpoint(task="stage", action="Begin stage execution", status="RUNNING", details={"script": script})
             try:
-                yield
+                from infrastructure.shared.usage.session import observed_stage
+                with observed_stage(output_dir, script.removesuffix(".py")):
+                    yield
             except BaseException as error:
                 outcome = "INTERRUPTED" if isinstance(error, KeyboardInterrupt) else "FAILED"
                 failure = {"error": str(error), "error_type": type(error).__name__}

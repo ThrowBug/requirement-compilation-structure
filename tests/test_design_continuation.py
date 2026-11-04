@@ -99,6 +99,17 @@ class DesignContinuation(unittest.TestCase):
         raw, tree, ui, triggers, backend, obligations = frontend_fixture()
         contexts = {rid: {**requirement, 'images': {}, 'steps': [tree.steps[sid] for sid in tree.own_steps[rid]]}
             for rid, requirement in tree.requirements.items()}
+        tree.leaves = [rid for rid in tree.leaves if rid != 'REQ-B']
+        tree.steps = {sid: step for sid, step in tree.steps.items() if sid != 'STEP-REQ-B'}
+        contexts.pop('REQ-B', None)
+        for aid, api in backend['apis'].items():
+            api['signature'] = {'method': 'POST', 'path': '/api/' + aid, 'name': aid}
+        backend['requirements'].pop('REQ-B', None)
+        ui['requirements'].pop('REQ-B', None)
+        tree.requirements.pop('REQ-B', None)
+        tree.children.pop('REQ-B', None)
+        tree.own_steps.pop('REQ-B', None)
+        obligations['requirements'].pop('REQ-B', None)
         with TemporaryDirectory() as directory:
             arc = Path(directory)
             def ui_proposal(_, request):
@@ -107,12 +118,14 @@ class DesignContinuation(unittest.TestCase):
                     return {}
                 pid = 'summary' if rid == 'REQ-C' else 'editor'
                 page = page_context(ui, pid)
-                return {'pages': {pid: ui['pages'][pid]}, 'elements': page['elements'],
-                    'bindings': page['bindings'], 'requirement_ui': ui['requirements'][rid],
+                return {'pages': {pid: {key: value for key, value in ui['pages'][pid].items() if key != 'fixtures'}}, 'elements': page['elements'],
+                    'requirement_ui': ui['requirements'][rid],
                     'step_ui': {sid: ui['steps'][sid] for sid in tree.own_steps[rid]}}
             with self.assertRaises(StageIncomplete):
                 synthesize_ui(arc, tree, {}, contexts, Mock(generate_json=ui_proposal), Mock(), max_attempts=1)
-            self.assertIn('summary', json.loads((arc / 'ui_design.json').read_text())['pages'])
+            design = json.loads((arc / 'ui_design.json').read_text())
+            self.assertIn('summary', design['pages'])
+            self.assertIn('UI-COUNT', design['elements'])
             obligations['steps'] = {sid: obligations['requirements'][rid]
                 for rid in tree.leaves for sid in tree.own_steps[rid]}
             save_json(arc / 'db_obligations.json', obligations)
@@ -125,4 +138,5 @@ class DesignContinuation(unittest.TestCase):
                     'requirement_triggers': tids, 'step_triggers': {sid: tids for sid in tree.own_steps[rid]}}
             with self.assertRaises(StageIncomplete):
                 synthesize_triggers(arc, ui, tree, backend, contexts, Mock(generate_json=trigger_proposal), Mock(), max_attempts=1)
-            self.assertIn('TR-COUNT', json.loads((arc / 'frontend_triggers.json').read_text())['triggers'])
+            trigger_result = json.loads((arc / 'frontend_triggers.json').read_text())
+            self.assertIn('TR-COUNT', trigger_result['triggers'])

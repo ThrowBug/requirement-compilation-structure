@@ -10,3 +10,11 @@ docs/
 
 AGENTS.md
 .vscode/
+
+# Local regression evidence and historical submission archives.
+/.test-tmp/
+/.test-results.txt
+/frontend-results.txt
+/single-result.txt
+/*.zip
+token-regression-analysis.md
