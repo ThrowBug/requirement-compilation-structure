@@ -7,6 +7,7 @@ import subprocess
 from tempfile import TemporaryDirectory
 
 from infrastructure.utils.processes import capture_process, npm_command
+from infrastructure.stages.database.sql_policy import check_existing_tables
 
 
 PROBE_SOURCE = r'''
@@ -129,6 +130,10 @@ class DatabaseChecks:
             raise ValueError("Node.js is required for database initialization checks")
 
     def run(self):
+        try:
+            check_existing_tables(self.output, self.schema)
+        except ValueError as error:
+            return {"returncode": 1, "phase": "SQLite write safety", "error": str(error)}
         try:
             build = capture_process([*npm_command(), "run", "build", "--workspace", "@arc/backend"],
                 cwd=self.output, timeout=600)

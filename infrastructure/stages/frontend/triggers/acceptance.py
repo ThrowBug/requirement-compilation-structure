@@ -1,10 +1,12 @@
 """Independent requirement acceptance, separate from implementation-owned tests."""
 
 from hashlib import sha256
+import re
 import yaml
 
 from infrastructure.shared.agent.tools import FileTools
-from infrastructure.shared.agent.loop import run_file_agent
+from infrastructure.shared.agent.feedback import compact_feedback
+from infrastructure.shared.agent.loop import FileGateHandoff, run_file_agent
 from infrastructure.shared.agent.context import SourceFiles
 from infrastructure.shared.agent.discovery import project_index
 from infrastructure.shared.agent.recovery import implementation_task
@@ -19,7 +21,7 @@ from infrastructure.stages.frontend.triggers.scope import TriggerCheckFailure
 from infrastructure.stages.frontend.triggers.design import api_ids
 from infrastructure.stages.frontend.ui.runtime import APPLICATION_ENTRYPOINTS
 from infrastructure.stages.frontend.ui.testing import FrontendChecks, require_green, test_path as ui_test_path
-from infrastructure.utils.files import read_artifact, save_json
+from infrastructure.utils.files import read_artifact, save_bytes, save_json
 from infrastructure.shared.project.git import checkpoint
 
 INSTRUCTIONS = '''Write independent final acceptance tests for ONE original requirement.
@@ -58,6 +60,10 @@ registration/creation implementations. Arrange scenario-specific absence or conf
 Given states in the isolated test database; still drive the current When through the UI.
 Seed additional minimal valid Given records using the documented database/test utilities. Application
 sources, shared fixtures, original requirements and other suites are not editable.
+For successful submissions, perform every required action (including checking consent),
+including when reusing a shared form for setup. For dates relative to today, derive valid
+input dates at test execution and compare stored dates with the values actually submitted.
+Never assert a guessed year or prefix, or rely on implied consent/default form state.
 During generation only TypeScript is checked; missing application behavior is a useful
 acceptance failure, never a reason to weaken assertions. Use edit_file to create or repair only test_path under frontend/tests/e2e/acceptance.'''
 
@@ -72,6 +78,12 @@ business failure GREEN. Never adjust expected values just to match observed wron
 Use original requirements as authority; no application source or process tests are available.'''
 
 REVIEW_INSTRUCTIONS += '''
+Review the complete failing workflow and its later assertions, not just the first error.
+Check all required input actions, consent and fixture preconditions. Compare persisted
+dates against the submitted values, not a fixed year prefix when the requirement is relative.
+Fix missing actions or unjustified assertions in the test; do not ask the application to
+default consent to true to make an incomplete test pass. Use cause=uncertain and no edits
+if the evidence cannot distinguish a test defect from an implementation defect.
 Review endpoint assumptions as well as selectors. A generated API URL is not an original
 requirement. If the original does not prescribe transport, correct a hardcoded endpoint
 wait into visible-business completion, persisted-result checks and observeMutations.
@@ -79,7 +91,28 @@ Preserve detection of duplicate writes/submissions across endpoint aliases. Neve
 an explicit original HTTP contract or remove success, rejection or identity coverage.
 '''
 
-ORACLE_POLICY_VERSION = 2
+ORACLE_POLICY_VERSION = 3
+
+
+def failure_signatures(result):
+    """Compare assertions without ANSI rendering, source excerpts or timing counters."""
+    signatures = set()
+    for message in result.get('failures', []):
+        clean = re.sub(r'\x1b\[[0-9;]*m', '', message)
+        lines = [line.strip() for line in clean.splitlines() if line.strip()]
+        if not lines:
+            continue
+        location = next((line for line in reversed(lines) if line.startswith('Test file: ')), '')
+        assertion = tuple(line for line in lines if line.startswith(('Locator:', 'Expected')))
+        if site := re.search(r'\bat [^\n]*?\.spec\.ts:(\d+:\d+)', clean):
+            assertion += (site[1],)
+        signatures.add((location, lines[0], assertion))
+    return signatures
+
+
+class ReviewNewFailure(FileGateHandoff):
+    def __init__(self, result):
+        self.result = result
 
 
 def require_acceptance(result):
@@ -151,6 +184,39 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                     raise ValueError(result['output'])
                 return result
 
+            def review_suite(feedback, action):
+                verdict = {}
+                suite = output / path
+                before = suite.read_bytes()
+
+                def validate(response):
+                    diagnosis = response.get('diagnosis')
+                    cause = diagnosis.get('cause') if isinstance(diagnosis, dict) else None
+                    reason = diagnosis.get('reason') if isinstance(diagnosis, dict) else None
+                    if cause not in {'test_requirement_mismatch', 'test_overconstraint', 'environment',
+                            'implementation', 'uncertain'} or not isinstance(reason, str) or not reason.strip():
+                        raise ValueError('Return a supported review diagnosis and its evidence in diagnosis.reason')
+                    if response['tool_calls'] and cause not in {'test_requirement_mismatch', 'test_overconstraint'}:
+                        raise ValueError('Only a test defect diagnosis may propose test edits; otherwise return tool_calls=[]')
+                    if cause not in {'test_requirement_mismatch', 'test_overconstraint'} and suite.read_bytes() != before:
+                        # A no-edit verdict must be based on the original suite,
+                        # not a draft that failed the previous review gate.
+                        save_bytes(suite, before)
+                        raise ValueError('Discarded the unaccepted test draft. Review the restored original suite.')
+                    verdict.update(diagnosis)
+
+                try:
+                    review = run_file_agent(model, REVIEW_INSTRUCTIONS, task, workspace, compile_suite,
+                        max_turns, console, label + ' / ' + action, include_conventions=False,
+                        feedback=compact_feedback(feedback), validate_response=validate)
+                except BaseException:
+                    if not suite.is_file() or suite.read_bytes() != before:
+                        save_bytes(suite, before)
+                        checkpoint(output, stage='12', task=rid, action='Restore rejected independent test draft',
+                            status='REJECTED', details={'test_path': path})
+                    raise
+                return verdict, review['turns'], before != suite.read_bytes()
+
             if not (output / path).is_file():
                 agent = run_file_agent(model, INSTRUCTIONS, task, workspace, compile_suite,
                     max_turns, console, label + ' / Generation', include_conventions=False)
@@ -158,11 +224,9 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
             elif previous.get('requirements', {}).get(rid, {}).get('oracle_policy') != ORACLE_POLICY_VERSION:
                 # Existing suites may encode the old generated-URL oracle. Review
                 # them against the original requirement before application repair.
-                review = run_file_agent(model, REVIEW_INSTRUCTIONS, task, workspace, compile_suite,
-                    max_turns, console, label + ' / Policy review', include_conventions=False,
-                    feedback={'review_reason': 'acceptance_oracle_policy_changed',
-                        'policy_version': ORACLE_POLICY_VERSION})
-                entry['policy_review_turns'] = review['turns']
+                _, turns, _ = review_suite({'review_reason': 'acceptance_oracle_policy_changed',
+                    'policy_version': ORACLE_POLICY_VERSION}, 'Policy review')
+                entry['policy_review_turns'] = turns
             entry['oracle_policy'] = ORACLE_POLICY_VERSION
             result = checks.tests([path])
             entry["result"] = result
@@ -175,11 +239,19 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                 save_json(arc_dir / 'independent_acceptance.json', report)
                 checkpoint(output, stage="12", task=rid, action="Record independent acceptance before test review",
                     status="FAILED", details={"test_path": path, "checks": result})
-                review = run_file_agent(model, REVIEW_INSTRUCTIONS, task, workspace, compile_suite,
-                    max_turns, console, label + ' / Test review', feedback=result, include_conventions=False)
-                entry['review_turns'] = review['turns']
-                result = checks.tests([path])
+                verdict, turns, changed = review_suite(result, 'Test review')
+                entry.update(review_turns=turns, review_diagnosis=verdict)
+                if changed:
+                    result = checks.tests([path])
+                    if test_run_status(result) != 'GREEN':
+                        verdict, turns, changed = review_suite(result, 'Post-correction review')
+                        entry.update(post_correction_review_turns=turns, review_diagnosis=verdict)
+                        if changed:
+                            result = checks.tests([path])
                 entry["result"] = result
+                if test_run_status(result) != 'GREEN' and (verdict['cause'] != 'implementation' or changed):
+                    raise ValueError('Independent suite still fails without a confirmed implementation defect: '
+                        + verdict['reason'])
             if test_run_status(result) != 'GREEN' or pending_verification:
                 entry['status'] = 'REPAIRING'
                 save_json(arc_dir / 'independent_acceptance.json', report)
@@ -202,22 +274,32 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                         *APPLICATION_ENTRYPOINTS, 'frontend/package.json', 'frontend/tsconfig.json'])
                 repair_workspace.allow_write = lambda relative: editable_runtime_path(output, relative)
                 backend_selection.include(repair_workspace, backend_selection.paths('api', aids))
+                reviewed_failures = failure_signatures(result)
+                extra_review = False
 
                 def repair_gate():
                     evidence = {}
+                    check = 'typecheck'
                     try:
                         evidence['typecheck'] = checks.typecheck([*process_files, *acceptance_files])
                         if evidence['typecheck']['returncode']:
                             raise ValueError(evidence['typecheck']['output'])
+                        check = 'acceptance'
                         evidence['acceptance'] = checks.tests(acceptance_files)
+                        new_failures = failure_signatures(evidence['acceptance']) - reviewed_failures
+                        if new_failures and test_run_status(evidence['acceptance']) != 'GREEN':
+                            raise ReviewNewFailure(evidence['acceptance'])
                         require_acceptance(evidence['acceptance'])
                         if process_files:
+                            check = 'smoke'
                             evidence['smoke'] = checks.tests(process_files)
                             require_acceptance(evidence['smoke'])
                         if ui_files:
+                            check = 'ui'
                             evidence['ui'] = ui_checks.tests(ui_files)
                             require_green(evidence['ui'])
                         if pending_verification or any(relative.startswith('backend/') for relative in repair_workspace.changed_paths):
+                            check = 'backend_typecheck'
                             evidence['backend_typecheck'] = backend_checks.typecheck()
                             if evidence['backend_typecheck']['returncode']:
                                 raise ValueError(evidence['backend_typecheck']['output'])
@@ -225,32 +307,74 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                                 if (selected := selected_path(output, 'backend_test', aid))
                                 and (output / selected).is_file()]
                             if suites:
+                                check = 'backend'
                                 evidence['backend'] = backend_checks.tests(suites)
                                 require_backend_green(evidence['backend'])
+                        check = 'build'
                         evidence['build'] = checks.build()
                         if evidence['build']['returncode']:
                             raise ValueError(evidence['build']['output'])
                     except (ValueError, RuntimeError) as error:
-                        raise TriggerCheckFailure(str(error), evidence) from error
+                        message = f'Independent acceptance repair failed at {check}' if check in evidence else str(error)
+                        raise TriggerCheckFailure(message, evidence) from error
                     return evidence
 
                 def repair_feedback(value):
                     return selection.feedback(repair_workspace, backend_selection.feedback(repair_workspace, value))
 
                 with implementation_task(output, entry, console, label + ' / Repair'):
-                    repair = run_file_agent(model, IMPLEMENT_INSTRUCTIONS + '\n\n'
+                    instructions = IMPLEMENT_INSTRUCTIONS + '\n\n' + (
                         'Independent acceptance suites are read-only for implementation repair. '
                         'Preserve their original requirement outcomes and repair the real application. '
-                        'Test review has already been performed separately. Failures in supplied final '
-                        'regression/build checks are also repair targets: retrieve the failing requirement '
-                        'and source evidence on demand, and preserve other accepted behavior.',
-                        repair_task, repair_workspace, repair_gate, max_turns, console,
-                        label + ' / Repair', feedback={'acceptance': result,
-                            'verification': process_report.get('verification', {}) if pending_verification else {}},
-                        feedback_filter=repair_feedback,
-                        context_index=context_index)
-                    entry.update(status='GREEN', repair_turns=repair['turns'],
-                        result=repair['checks']['acceptance'], repair_checks=repair['checks'])
+                        'Do not change consent defaults or persisted inputs to accommodate missing test actions '
+                        'or invented expectations. Newly exposed assertions return to independent review.')
+                    turns_used = 0
+                    repair_evidence = {'acceptance': result,
+                        'verification': process_report.get('verification', {}) if pending_verification else {}}
+                    while turns_used < max_turns:
+                        try:
+                            repair = run_file_agent(model, instructions, repair_task, repair_workspace,
+                                repair_gate, max_turns - turns_used, console, label + ' / Repair',
+                                feedback=repair_evidence, feedback_filter=repair_feedback, context_index=context_index)
+                            turns_used += repair['turns']
+                            accepted_checks = repair['checks']
+                            break
+                        except ReviewNewFailure as handoff:
+                            turns_used += handoff.turns
+                            entry['new_failure'] = handoff.result
+                            new = failure_signatures(handoff.result) - reviewed_failures
+                            own_failures = all(location and path.endswith('/' + location.removeprefix('Test file: ').replace('\\', '/'))
+                                for location, _, _ in new)
+                            if extra_review or not own_failures:
+                                raise ValueError('New independent acceptance failure requires separate review; '
+                                    'stopped application repair') from handoff
+                            extra_review = True
+                            verdict, turns, changed = review_suite(handoff.result, 'New failure review')
+                            entry.update(new_failure_review_turns=turns, new_failure_diagnosis=verdict)
+                            reviewed_failures.update(failure_signatures(handoff.result))
+                            if changed:
+                                try:
+                                    accepted_checks = repair_gate()
+                                except TriggerCheckFailure as error:
+                                    tested = error.feedback['checks'].get('acceptance')
+                                    if tested is not None and test_run_status(tested) == 'GREEN':
+                                        # The corrected oracle passed. Remaining smoke,
+                                        # runtime and build failures are still repairable.
+                                        repair_evidence = {'acceptance': tested, 'regression': error.feedback}
+                                        continue
+                                    raise ValueError('Independent acceptance still fails after the bounded test correction') from error
+                                except ReviewNewFailure as error:
+                                    entry['new_failure_after_review'] = error.result
+                                    raise ValueError('Independent acceptance or regression still fails after '
+                                        'the bounded test correction') from error
+                                break
+                            if verdict['cause'] != 'implementation':
+                                raise ValueError('New failure was not attributed to the application: ' + verdict['reason'])
+                            repair_evidence = {**repair_evidence, 'acceptance': handoff.result}
+                    else:
+                        raise ValueError('Application repair budget exhausted after independent test review')
+                    entry.update(status='GREEN', repair_turns=turns_used,
+                        result=accepted_checks['acceptance'], repair_checks=accepted_checks)
                 if entry['status'] == 'FAILED':
                     continue
                 result = entry['result']

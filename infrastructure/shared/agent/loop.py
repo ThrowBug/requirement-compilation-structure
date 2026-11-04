@@ -26,10 +26,14 @@ class AgentExhausted(ValueError):
         self.feedback = feedback
 
 
+class FileGateHandoff(Exception):
+    """A stage gate requests another task before any further file repair."""
+
+
 @agent_task("file")
 def run_file_agent(model, instructions: str, task: dict, files: FileTools, gate,
         max_turns: int, console, label: str, feedback=None, feedback_filter=None, context_index=None,
-        allow_discovery=True, include_conventions=True) -> dict:
+        allow_discovery=True, include_conventions=True, validate_response=None) -> dict:
     """Refresh files and paths; optionally select failure-related files before repair.
 
     The stage-owned feedback filter may add writable sources/read-only references
@@ -151,6 +155,8 @@ def run_file_agent(model, instructions: str, task: dict, files: FileTools, gate,
             if isinstance(response, dict) and response.get("diagnosis"):
                 console.show(label + " | Failure diagnosis", json.dumps(response["diagnosis"], ensure_ascii=False, indent=2))
             calls = response["tool_calls"]
+            if validate_response is not None:
+                validate_response(response)
             results = files.execute(calls)
             for change in files.last_changes:
                 read_files.pop(change["path"], None)
@@ -178,6 +184,9 @@ def run_file_agent(model, instructions: str, task: dict, files: FileTools, gate,
             checkpoint(files.output, task=label, action=f"Accept edit round {turn}",
                 details={"round": turn, "checks": checks})
             return {"turns": turn, "checks": checks}
+        except FileGateHandoff as handoff:
+            handoff.turns = turn
+            raise
         except (*RESPONSE_ERRORS, RuntimeError, OSError) as error:
             confirm_response(model, False)
             failure = observe_failure(error, round=turn, will_retry=turn < max_turns,

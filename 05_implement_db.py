@@ -7,6 +7,7 @@ from pathlib import Path
 from infrastructure.utils.cli import create_parser, resolve_directories
 from infrastructure.stages.database.order import implementation_groups, table_dependencies
 from infrastructure.stages.database.runtime import initializer_source
+from infrastructure.stages.database.sql_policy import check_table_sql
 from infrastructure.shared.models.text import TextModel
 from infrastructure.utils.presentation.console import DemoConsole
 from infrastructure.utils.presentation.formatting import format_schema
@@ -44,6 +45,8 @@ aggregates or window functions. For JSON arrays, use scalar checks such as
 json_valid(field) and json_type(field) = 'array'; validate array element types in
 application code, not with json_each subqueries inside CHECK. Keep constraints
 requiring multi-row or cross-table inspection in application code.
+CHECK must be deterministic: never use date('now'), datetime(), CURRENT_DATE or time-zone
+modifiers in CHECK. Keep date formats in SQL; validate comparisons with today before writes.
 This task creates one table, without extra tables, data mutations or application startup code.
 referenced_tables provides target definitions and available SQL. A null implementation
 means the target has not been generated yet; SQLite forward references can express
@@ -114,6 +117,7 @@ def implement_db(arc_dir: Path, pause: bool = False, max_attempts: int = 10, max
                 def generated_table():
                     if not (output_dir / expected_path).is_file():
                         raise ValueError("Create the current SQL output_path with edit_file")
+                    check_table_sql(read_source(output_dir / expected_path), expected_path)
                     return {"path": expected_path, "status": "GENERATED"}
 
                 run_file_agent(model, INSTRUCTIONS, request, tools, generated_table,

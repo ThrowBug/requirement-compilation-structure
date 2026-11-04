@@ -114,6 +114,9 @@ Generated tests can be corrected against requirement and API evidence when their
 expectations or fixtures are wrong or overly strict. Preserve required success and
 rejection coverage; do not weaken a valid assertion to accept broken behavior.
 SQL, designs, test utilities and compiler infrastructure remain references.
+Do not pre-create alternate tables from the server or bypass canonical DDL. Enforce rules
+relative to the current date in application validation before writes, without weakening
+the required success and rejection cases.
 The compiler starts the real server and runs current/accepted HTTP API suites after TypeScript checks. Repair implementation
 failures without weakening assertions or detecting tests to fake business behavior.
 """

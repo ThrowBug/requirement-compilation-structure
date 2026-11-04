@@ -17,6 +17,7 @@ from infrastructure.shared.agent.tools import FileTools
 from infrastructure.stages.database.implementation import verify_database_runtime
 from infrastructure.stages.database.runtime import initializer_source
 from infrastructure.stages.database.testing import DatabaseChecks
+from infrastructure.stages.database.sql_policy import check_table_sql
 from infrastructure.utils.files import save_json, save_text
 
 
@@ -43,6 +44,17 @@ def prepare(output, sql=SQL):
 
 
 class DatabaseRepairProtocol(unittest.TestCase):
+    def test_clock_checks_are_rejected_without_rejecting_date_formats_or_defaults(self):
+        path = 'backend/src/db/tables/Note.sql'
+        for expression in ("date /* nested */ ('NOW')", '"date"((\'now\'))', "datetime()", "strftime('%Y')",
+                "date(tags, 'localtime')", "CURRENT_DATE"):
+            with self.subTest(expression=expression), self.assertRaisesRegex(ValueError, 'Note.sql.*clock-dependent'):
+                check_table_sql(f'CREATE TABLE Note(tags TEXT CHECK (tags < {expression}));', path)
+        check_table_sql("-- CHECK(date('now'))\nCREATE TABLE Note(tags TEXT DEFAULT CURRENT_DATE "
+            "CHECK (date(tags) = tags OR tags = 'CHECK(datetime())') "
+            "CHECK (datetime('2000-01-01','subsec') IS NOT NULL) "
+            "CHECK (strftime('now', '2000-01-01') = 'now'));", path)
+
     def test_file_discovery_can_expand_database_edit_permissions(self):
         with TemporaryDirectory() as temporary, redirect_stdout(StringIO()):
             output = Path(temporary)
@@ -136,6 +148,29 @@ class RealDatabaseRuntime(unittest.TestCase):
             self.assertEqual(result['returncode'], 0, result)
             observed = capture_process(['node', '-e', "const D=require('better-sqlite3');const d=new D('backend/data/app.db');console.log(d.prepare('SELECT tags FROM Note WHERE id=1').get().tags);d.close();"], cwd=output, timeout=30)
             self.assertEqual(observed['stdout'].strip(), '["saved"]')
+
+    def test_write_failure_is_repaired_at_database_stage_instead_of_server_workaround(self):
+        from infrastructure.utils.processes import capture_process
+        path = 'backend/src/db/tables/Note.sql'
+        bad = SQL.replace('CHECK(json_valid', "CHECK(date('2029-04-22') > date('now')) CHECK(json_valid")
+        with TemporaryDirectory() as directory, redirect_stdout(StringIO()):
+            output, arc = self.workspace(directory, bad)
+            script = "const D=require('better-sqlite3');const d=new D(':memory:');d.exec(require('fs').readFileSync(process.argv[1],'utf8'));d.prepare('INSERT INTO Note(id,tags) VALUES(1,?)').run('[]');"
+            broken = capture_process(['node', '-e', script, path], cwd=output, timeout=30)
+            self.assertNotEqual(broken['returncode'], 0)
+            self.assertIn('non-deterministic use of date()', broken['stderr'])
+            server_before = (output / 'backend/src/server.ts').read_bytes()
+            def repair(_, request):
+                self.assertIn('SQLite write safety', str(request['feedback']))
+                self.assertTrue(request['files'][path]['writable'])
+                return propose_files(output, [{'path': path, 'content': SQL}])
+            model = Mock(generate_json=Mock(side_effect=repair))
+            report = verify_database_runtime(arc, schema(), model, Mock(), max_turns=1)
+            self.assertEqual(report['status'], 'GREEN')
+            model.generate_json.assert_called_once()
+            self.assertEqual((output / 'backend/src/server.ts').read_bytes(), server_before)
+            fixed = capture_process(['node', '-e', script, path], cwd=output, timeout=30)
+            self.assertEqual(fixed['returncode'], 0, fixed)
 
     def test_invalid_sql_gets_concrete_file_feedback_and_real_edit_repair(self):
         with TemporaryDirectory() as directory, redirect_stdout(StringIO()):

@@ -14,6 +14,127 @@ from test_frontend_flow import frontend_fixture
 
 
 class IndependentAcceptance(unittest.TestCase):
+    def test_review_exhaustion_restores_original_suite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir, ui, triggers, backend = self.setup_workspace(root)
+            suite = acceptance_path('REQ-A')
+            def generate(_, request):
+                path = request['task']['test_path']
+                if request['feedback']:
+                    return propose_files(root, [{'path': path, 'content': 'invalid draft'}],
+                        diagnosis={'cause': 'test_overconstraint', 'reason': 'Incorrect expectation'})
+                return propose_files(root, [{'path': path, 'content': 'original assertions'}])
+            checks = Mock()
+            checks.typecheck.side_effect = lambda paths, **_: ({'returncode': 1, 'output': 'does not compile'}
+                if (root / paths[0]).read_text() == 'invalid draft' else {'returncode': 0})
+            checks.tests.side_effect = lambda paths: ({'returncode': 1, 'failed': 1, 'passed': 0,
+                'failures': ['bad expectation']} if suite in paths else {'returncode': 0, 'failed': 0, 'passed': 1})
+            with patch('infrastructure.stages.frontend.triggers.acceptance.E2EChecks', return_value=checks), \
+                    patch('infrastructure.stages.frontend.triggers.acceptance.BackendChecks'), \
+                    patch('infrastructure.stages.frontend.triggers.acceptance.FrontendChecks'):
+                report = run_independent_acceptance(input_dir, root / '.arc', {'entities': {}}, backend, ui,
+                    triggers, Mock(generate_json=generate), Mock(), max_turns=1,
+                    process_report={'requirements': {}, 'verification': {}})
+            self.assertEqual(report['requirements']['REQ-A']['status'], 'FAILED')
+            self.assertEqual((root / suite).read_text(), 'original assertions')
+
+    def test_uncertain_oracle_cannot_edit_tests_or_trigger_application_repair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir, ui, triggers, backend = self.setup_workspace(root)
+            suite = acceptance_path('REQ-A')
+            reviews = []
+            def generate(_, request):
+                self.assertNotIn('repair_reason', request['task'])
+                path = request['task']['test_path']
+                if not request['feedback']:
+                    return propose_files(root, [{'path': path, 'content': 'original assertions'}])
+                reviews.append(request)
+                if len(reviews) == 1:
+                    return propose_files(root, [{'path': path, 'content': 'weakened assertions'}],
+                        diagnosis={'cause': 'implementation', 'reason': 'Claims a source issue'})
+                self.assertIn('Only a test defect diagnosis', str(request['feedback']))
+                return propose_files(root, [], diagnosis={'cause': 'uncertain', 'reason': 'Missing submission evidence'})
+
+            checks = Mock()
+            checks.typecheck.return_value = {'returncode': 0}
+            checks.tests.side_effect = lambda paths: ({'returncode': 1, 'failed': 1, 'passed': 0,
+                'failures': ['unknown assertion']} if suite in paths else {'returncode': 0, 'failed': 0, 'passed': 1})
+            with patch('infrastructure.stages.frontend.triggers.acceptance.E2EChecks', return_value=checks), \
+                    patch('infrastructure.stages.frontend.triggers.acceptance.BackendChecks'), \
+                    patch('infrastructure.stages.frontend.triggers.acceptance.FrontendChecks'):
+                report = run_independent_acceptance(input_dir, root / '.arc', {'entities': {}}, backend, ui,
+                    triggers, Mock(generate_json=generate), Mock(), max_turns=2,
+                    process_report={'requirements': {}, 'verification': {}})
+            self.assertEqual(len(reviews), 2)
+            self.assertEqual(report['requirements']['REQ-A']['status'], 'FAILED')
+            self.assertEqual(report['requirements']['REQ-A']['review_diagnosis']['cause'], 'uncertain')
+            self.assertEqual((root / suite).read_text(), 'original assertions')
+            self.assertEqual(report['requirements']['REQ-C']['status'], 'GREEN')
+
+    def test_new_assertion_after_application_fix_returns_to_read_only_oracle_review(self):
+        self.check_new_assertion()
+
+    def test_application_repair_can_continue_after_oracle_correction_and_build_failure(self):
+        self.check_new_assertion(build_failure=True)
+
+    def check_new_assertion(self, build_failure=False):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir, ui, triggers, backend = self.setup_workspace(root)
+            suite = acceptance_path('REQ-A')
+            filename = suite.removeprefix('frontend/tests/e2e/')
+            source = 'frontend/src/App.tsx'
+            save_text(root / source, 'initial application')
+            green = {'returncode': 0, 'passed': 1, 'failed': 0}
+            calls = []
+
+            def tests(paths):
+                if suite not in paths:
+                    return green
+                if 'compare submitted date' in (root / suite).read_text():
+                    return green
+                failure = ('Error: missing label' if 'initial' in (root / source).read_text()
+                    else 'Error: wrong stored date assertion\nExpected substring: 203\nReceived string: 2029-04-22')
+                return {'returncode': 1, 'passed': 0, 'failed': 1, 'failures': [failure + '\nTest file: ' + filename]}
+
+            def generate(prompt, payload):
+                task, feedback = payload['task'], payload['feedback']
+                if 'repair_reason' in task:
+                    calls.append('application')
+                    self.assertFalse(payload['files'][suite]['writable'])
+                    if calls.count('application') == 2:
+                        self.assertIn('build failed', str(feedback))
+                        return propose_files(root, [{'path': source, 'content': 'fixed label and build'}])
+                    return propose_files(root, [{'path': source, 'content': 'fixed label'}])
+                if not feedback:
+                    return propose_files(root, [{'path': task['test_path'], 'content': 'business assertions and hardcoded date'}])
+                self.assertFalse(payload['context_kinds'])
+                if 'Expected substring: 203' in str(feedback):
+                    calls.append('new oracle review')
+                    self.assertNotIn(source, payload['files'])
+                    return propose_files(root, [{'path': suite, 'content': 'business assertions and compare submitted date'}],
+                        diagnosis={'cause': 'test_overconstraint', 'reason': 'Original requires a future date, not a year prefix'})
+                calls.append('original review')
+                return propose_files(root, [], diagnosis={'cause': 'implementation', 'reason': 'Required label is absent'})
+
+            checks = Mock()
+            checks.typecheck.return_value = {'returncode': 0}
+            checks.tests.side_effect = tests
+            checks.build.side_effect = lambda: ({'returncode': 1, 'output': 'build failed'}
+                if build_failure and (root / source).read_text() == 'fixed label' else {'returncode': 0})
+            with patch('infrastructure.stages.frontend.triggers.acceptance.E2EChecks', return_value=checks), \
+                    patch('infrastructure.stages.frontend.triggers.acceptance.BackendChecks'), \
+                    patch('infrastructure.stages.frontend.triggers.acceptance.FrontendChecks'):
+                report = run_independent_acceptance(input_dir, root / '.arc', {'entities': {}}, backend, ui,
+                    triggers, Mock(generate_json=generate), Mock(), max_turns=2 if build_failure else 1,
+                    process_report={'requirements': {}, 'verification': {}})
+            self.assertEqual(calls, ['original review', 'application', 'new oracle review'] + (['application'] if build_failure else []))
+            self.assertEqual(report['status'], 'GREEN')
+            self.assertEqual(report['requirements']['REQ-A']['repair_turns'], 2 if build_failure else 1)
+            self.assertEqual((root / source).read_text(), 'fixed label and build' if build_failure else 'fixed label')
+
     def test_generated_routes_and_conventions_do_not_become_the_acceptance_oracle(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
