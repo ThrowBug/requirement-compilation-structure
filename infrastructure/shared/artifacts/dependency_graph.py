@@ -127,6 +127,13 @@ class DependencyGraph:
         if _stage.get():
             self.depend(_stage.get(), "artifact:" + filename)
 
+    def observe_implementation_paths(self, kind, paths):
+        """Track the part of the shared index actually read by a stage."""
+        node = "implementation-paths:" + kind
+        self.register(node, version=digest(paths))
+        if _stage.get():
+            self.depend(_stage.get(), node)
+
     def publish(self, path, value):
         """A pending marker prevents a crash between artifact and manifest being reused."""
         from infrastructure.utils.files import save_bytes
@@ -196,6 +203,11 @@ class DependencyGraph:
             for rid in value.get("requirements", {}):
                 self.depend("test:" + filename + ":" + rid, "task:frontend:" + rid if filename != "backend_tdd.json" else "task:backend:" + rid)
         elif filename == "implementation_paths.json":
+            prefix = "implementation-paths:"
+            buckets = set(value) | {node.removeprefix(prefix) for node in self.data["nodes"]
+                if node.startswith(prefix)}
+            for kind in sorted(buckets):
+                self.register(prefix + kind, version=digest(value.get(kind, {})))
             for kind, paths in value.items():
                 if not isinstance(paths, dict):
                     continue

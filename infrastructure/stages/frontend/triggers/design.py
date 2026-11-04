@@ -8,7 +8,7 @@ from infrastructure.stages.database.obligations.rules import union
 
 def empty_triggers(tree):
     return {"triggers": {}, "requirements": {rid: [] for rid in tree.requirements},
-        "steps": {sid: [] for sid in tree.steps}}
+        "steps": {sid: [] for sid in tree.steps}, "owners": {}}
 
 
 def relevant_pages(ui, rid):
@@ -27,10 +27,31 @@ def trigger_obligations(trigger, backend):
 
 def apply_decomposition(current, proposal, rid):
     updated = deepcopy(current)
+    owners = updated.setdefault("owners", {})
+    for tid in proposal["triggers"]:
+        owners.setdefault(tid, rid)
     updated["triggers"].update(deepcopy(proposal["triggers"]))
     updated["requirements"][rid] = proposal["requirement_triggers"]
     updated["steps"].update(deepcopy(proposal.get("step_triggers", {})))
     return updated
+
+
+def validate_shared_changes(current, proposal, rid, accepted):
+    """References need no new definition. A foreign edit must name its consumers."""
+    changes = proposal.get("shared_changes", {})
+    if not isinstance(changes, dict):
+        raise ValueError("shared_changes must map changed trigger IDs to affected requirement IDs")
+    needed = {}
+    for tid, trigger in proposal["triggers"].items():
+        old = current["triggers"].get(tid)
+        if old is None or old == trigger:
+            continue
+        consumers = sorted(other for other in accepted if tid in current["requirements"].get(other, ()))
+        if consumers:
+            needed[tid] = consumers
+    if changes != needed:
+        raise ValueError(f"Reuse existing trigger definitions unchanged, or declare the exact shared_changes for "
+            f"an intentional update in {rid}: {needed}")
 
 
 def validate_coverage(design, backend, obligations, tree, requirement_ids):

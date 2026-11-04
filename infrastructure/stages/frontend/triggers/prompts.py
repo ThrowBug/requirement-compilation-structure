@@ -58,10 +58,21 @@ input values. A mount trigger describes required page-entry work, not a forced g
 Include/reuse a page-entry trigger in requirement_triggers only when THIS requirement needs
 its behavior. A shared page does not make all its triggers dependencies. Refer to earlier
 behavior when appropriate; do not implement unrelated future workflows as incidental setup.
+Cover explicit behavior in the requirement description as well as its examples. The
+unique_api_evidence map lists database effects only one supplied API can cover. Connect
+each listed API to its actual action; merely loading the page cannot substitute for a
+required user action that creates or changes state.
 For list actions identify the clicked row/object; for requests describe concrete parameter
 sources, conversions, success/rejection branches and resulting state updates. Do not rely
 on an undocumented global event payload or a particular generated context interface.
-Reuse trigger IDs where behavior is shared and preserve earlier behavior when updating.
+Reuse an existing trigger by ID in requirement_triggers and step_triggers without
+returning its definition. trigger_owners identifies the first accepted owner.
+If the original requirement truly needs a change to a previously accepted trigger,
+include shared_changes: {triggerId: [affected accepted requirement IDs]} with the
+full changed record. Preserve the affected requirements' behavior and obligations.
+If this requirement uses a different API on the same control, give that branch a new
+ID (use the current requirement ID as a prefix). The application still uses one handler
+for the control; the trigger IDs distinguish logical branches, not event listeners.
 When extending an existing operation, update/reuse its trigger instead of introducing
 another independently firing trigger for the same action. Describe the logical operation
 once; a submit button and its enclosing form are not two separate API submissions.

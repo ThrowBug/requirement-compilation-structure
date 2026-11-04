@@ -17,6 +17,23 @@ from infrastructure.utils.files import read_source, save_text
 
 
 class FileAgentTests(unittest.TestCase):
+    def test_provider_connection_failure_is_not_an_edit_repair(self):
+        import httpx
+        from openai import APIConnectionError
+        from infrastructure.shared.agent.loop import ProviderTransportUnavailable
+        from infrastructure.shared.agent.tools import FileTools
+        from tempfile import TemporaryDirectory
+
+        def broken(*args, **kwargs):
+            raise RuntimeError("Text model request failed: Connection error.") from APIConnectionError(
+                request=httpx.Request("POST", "https://example.invalid"))
+
+        with TemporaryDirectory() as directory:
+            model = Mock(generate_json=Mock(side_effect=broken))
+            with self.assertRaisesRegex(ProviderTransportUnavailable, "Connection error"):
+                run_file_agent(model, "", {}, FileTools(Path(directory)), Mock(), 10, Mock(), "transport")
+            model.generate_json.assert_called_once()
+
     def setUp(self):
         self.temporary = TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

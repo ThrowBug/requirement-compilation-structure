@@ -1,10 +1,13 @@
-"""Independent requirement acceptance, separate from implementation-owned tests."""
+"""Requirement-derived browser acceptance isolated from application repair."""
 
 from hashlib import sha256
+import json
 import re
+import subprocess
 import yaml
 
-from infrastructure.shared.agent.tools import FileTools
+from infrastructure.shared.agent.tools import FileToolError, FileTools
+from infrastructure.shared.artifacts.dependency_graph import digest
 from infrastructure.shared.agent.feedback import compact_feedback
 from infrastructure.shared.agent.loop import FileGateHandoff, run_file_agent
 from infrastructure.shared.agent.context import SourceFiles
@@ -21,21 +24,28 @@ from infrastructure.stages.frontend.triggers.scope import TriggerCheckFailure
 from infrastructure.stages.frontend.triggers.design import api_ids
 from infrastructure.stages.frontend.ui.runtime import APPLICATION_ENTRYPOINTS
 from infrastructure.stages.frontend.ui.testing import FrontendChecks, require_green, test_path as ui_test_path
-from infrastructure.utils.files import read_artifact, save_bytes, save_json
+from infrastructure.utils.files import read_artifact, save_bytes, save_json, save_text
 from infrastructure.shared.project.git import checkpoint
 
-INSTRUCTIONS = '''Write independent final acceptance tests for ONE original requirement.
-Derive expected results from original_requirement and its Given/When/Then scenarios.
+INSTRUCTIONS = '''Write the independent browser acceptance suite for ONE original requirement.
+Derive expected results from both the original requirement description and its Given/When/Then scenarios.
+An explicit behavior in the description remains required even if no scenario restates it.
+Apply parent_requirements only where a shared rule applies to the current scenario.
 Interface details are supplied only to locate UI elements/routes and prepare valid Given
 fixtures; they are not authority to weaken an original business requirement. Neither
 application source nor implementation-owned tests are supplied. Do not infer expected
-behavior from an observed implementation result or duplicate process smoke tests.
+behavior from an observed implementation result. This suite drives implementation and regression.
 
 Write a small Playwright suite at test_path using the supplied test/expect/database
 fixture. Drive When actions through the real browser without mocks or injected state.
 Use UI IDs or accessible locators for actions. Assert original required visible business
 outcomes, not design-inferred internal labels or every DOM attribute. Cover main success,
 critical rejection, correct identity/ownership, and refresh/persistence WHEN required.
+Use named_role_controls as a checklist of explicit role/name contracts on the routes
+visited by this requirement. Cover applicable shared navigation even when the scenario
+also has a narrower account action. A link appearance does not prove its session behavior.
+For exact names in the original requirements, use exact: true in getByRole and getByLabel.
+Scope shared text or links to their semantic container before selecting them.
 Use two distinct identities where identity isolation matters; a test that only creates
 one account cannot reject an implementation returning the first account for everyone.
 For required rejection-without-writes, verify the relevant persisted result is unchanged.
@@ -51,7 +61,8 @@ to exclude unrelated mutations. An earlier and a newer registration URL are not 
 required submissions. Preserve rejection-without-writes and distinct-identity assertions.
 Request data remain inspectable after navigation; do not wait for an unspecified response
 body after a full document navigation. Do not count all application requests globally.
-There is no arbitrary test-count quota: cover the few important outcomes for this task.
+Use test_count_hint as a size guide, never as a reason to omit an explicit outcome.
+Cover every required scenario outcome, including cancel/no-write where stated.
 
 The database fixture restores requirement-defined startup data before each test. Reuse
 those records when required; do not assume an empty database or insert duplicate identities.
@@ -94,6 +105,63 @@ an explicit original HTTP contract or remove success, rejection or identity cove
 ORACLE_POLICY_VERSION = 3
 
 
+EXACT_ROLE = re.compile(r'["“]([^"”\r\n]+)["”]\s*\(\s*role\s*=\s*([a-z][\w-]*)\s*\)')
+SELECTOR_AST = r"""
+const fs = require('node:fs');
+const ts = require('typescript');
+const { source, names } = JSON.parse(fs.readFileSync(0, 'utf8'));
+const pairs = new Set(names.map(([role, name]) => role + '\0' + name));
+const parsed = ts.createSourceFile('acceptance.spec.ts', source, ts.ScriptTarget.Latest, true);
+const points = [];
+function visit(node) {
+  if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+      && node.expression.name.text === 'getByRole') {
+    const [role, options] = node.arguments;
+    if (role && ts.isStringLiteral(role) && options && ts.isObjectLiteralExpression(options)
+        && !options.properties.some(p => ts.isSpreadAssignment(p) || p.name?.text === 'exact')) {
+      const name = options.properties.find(p => ts.isPropertyAssignment(p) && p.name?.text === 'name');
+      if (name && ts.isStringLiteral(name.initializer)
+          && pairs.has(role.text + '\0' + name.initializer.text)) {
+        points.push(options.getStart(parsed) + 1);
+      }
+    }
+  }
+  ts.forEachChild(node, visit);
+}
+visit(parsed);
+let result = source;
+for (const index of points.sort((a, b) => b - a)) {
+  result = result.slice(0, index) + ' exact: true,' + result.slice(index);
+}
+process.stdout.write(result);
+"""
+
+
+def declared_role_names(task):
+    original = task["original_requirement"]
+    texts = [original["description"], *(record["description"] for record in task.get("parent_requirements", ()))]
+    texts.extend(step[key] for step in original["steps"] for key in ("Given", "When", "Then"))
+    return {(role, label) for value in texts if isinstance(value, str)
+        for label, role in EXACT_ROLE.findall(value)}
+
+
+def normalize_exact_role_locators(output, path, task):
+    """Strengthen literal role selectors only when the original YAML declares the name."""
+    names = declared_role_names(task)
+    if not names or not (output / "node_modules/typescript/package.json").is_file():
+        return
+    suite = output / path
+    source = suite.read_text(encoding="utf-8-sig")
+    try:
+        rewritten = subprocess.run(["node", "-e", SELECTOR_AST], cwd=output,
+            input=json.dumps({"source": source, "names": sorted(names)}, ensure_ascii=False),
+            encoding="utf-8", capture_output=True, timeout=15, check=True).stdout
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError("Unable to normalize literal selectors with the installed TypeScript parser") from error
+    if rewritten != source:
+        save_text(suite, rewritten)
+
+
 def failure_signatures(result):
     """Compare assertions without ANSI rendering, source excerpts or timing counters."""
     signatures = set()
@@ -115,6 +183,10 @@ class ReviewNewFailure(FileGateHandoff):
         self.result = result
 
 
+class ReviewInitialFailure(ReviewNewFailure):
+    """Ask the isolated reviewer to evaluate a suspected oracle problem."""
+
+
 def require_acceptance(result):
     require_green(result)
     if result.get('skipped') or result.get('flaky'):
@@ -133,13 +205,100 @@ def original_requirements(input_dir):
     return RequirementTree(yaml.safe_load(path.read_text(encoding='utf-8-sig')))
 
 
+def trigger_handoff(output, design, rid, triggers, implemented):
+    """Separate current actions and reuse; IDs do not require dedicated source files."""
+    owned = set(design['requirements'].get(rid, ()))
+    result = {}
+    for tid in sorted(triggers):
+        path = selected_path(output, 'trigger', tid) or f'frontend/src/triggers/{tid}.ts'
+        existing = path if (output / path).is_file() else None
+        result[tid] = {'owner': design.get('owners', {}).get(tid),
+            'status': 'reuse' if tid in implemented else 'implement' if tid in owned else 'dependency',
+            'existing_handler': existing}
+    return result
+
+
+def frontend_repair_context(context, apis):
+    """Keep frontend wiring evidence; larger designs remain available on demand."""
+    direct = {trigger["source"] for trigger in context["triggers"].values()}
+    direct.update(action["ui"] for trigger in context["triggers"].values()
+        for action in trigger["action"] if action["kind"] == "ui")
+    controls = {"input", "checkbox", "select", "button", "form", "link", "radio", "radiogroup"}
+    interface_props = {"label", "name", "text", "role", "placeholder", "input_type", "visible", "href", "options"}
+    pages = {}
+    for pid, page in context["page_subtrees"].items():
+        elements = {}
+        for uid, element in page["elements"].items():
+            if uid in direct or element.get("type") in controls:
+                elements[uid] = {**{key: element[key] for key in ("type", "parent", "data") if key in element},
+                    "prop": {key: value for key, value in element.get("prop", {}).items() if key in interface_props}}
+        pages[pid] = {"route": page["route"], "root": page["root"], "elements": elements}
+    return {"page_subtrees": pages, "triggers": context["triggers"],
+        "backend_apis": {aid: {key: api[key] for key in ("signature", "request", "response", "description")
+            if key in api} for aid, api in apis.items()}}
+
+
+class FirstEditWorkspace(FileTools):
+    """Use the first turn for an edit when runtime and source evidence is complete."""
+    def __init__(self, workspace):
+        super().__init__(workspace.output, writable=workspace.writable, references=workspace.files,
+            target=workspace.target, allow_write=workspace.allow_write, readable=workspace.readable)
+        self.edit_first = True
+        self.received_initial_feedback = False
+
+    def schemas(self):
+        return [tool for tool in super().schemas() if not self.edit_first or tool["tool"] != "read_file"]
+
+    def effect(self, calls):
+        effect = super().effect(calls)
+        if self.edit_first and effect == "read":
+            raise FileToolError("READ_DEFERRED",
+                "Use the supplied source and verified HTTP contract for the first edit; read access follows feedback.")
+        return effect
+
+
+def label_stylesheets(workspace):
+    """Retain styles that can inject visible decoration into accessible names."""
+    selected = set()
+    for path in workspace.files:
+        if path.endswith(".css") and workspace.path(path).is_file():
+            css = workspace.path(path).read_text(encoding="utf-8-sig")
+            if re.search(r"""::(?:before|after)\s*\{[^}]*\bcontent\s*:\s*['"][^'"]*[\*∗]""",
+                    css, re.I | re.S):
+                selected.add(path)
+    return selected
+
+
+def paired_action_context(ui, design, rid):
+    """Only expand a repair to one peer that binds a different API on the same control."""
+    definitions = design["triggers"]
+    def bindings(owner):
+        return {(definitions[tid]["source"], definitions[tid]["event"]): set(api_ids(definitions[tid]))
+            for tid in design["requirements"].get(owner, ()) if api_ids(definitions[tid])}
+    own = bindings(rid)
+    peers = []
+    for other in design["requirements"]:
+        if other == rid:
+            continue
+        alternate = bindings(other)
+        if any(own[key] != alternate[key] for key in own.keys() & alternate.keys()):
+            peers.append(other)
+    if len(peers) == 1:
+        peer = peers[0]
+        return peer, scenario_context(ui, design, peer)
+    return None, None
+
+
 def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, model, console,
-        max_turns=10, *, process_report):
+        max_turns=10, *, process_report, primary=False, max_tests=2):
     output = arc_dir.parent.resolve()
     tree = original_requirements(input_dir)
+    parents = {child: owner for owner, children in tree.children.items() for child in children}
     checks = E2EChecks(output)
     ui_checks = FrontendChecks(output)
     backend_checks = BackendChecks(output)
+    verified_http = (read_artifact(arc_dir, 'backend_tdd.json').get('green', {})
+        if primary and (arc_dir / 'backend_tdd.json').is_file() else {})
     selection = SourceFiles(output, ui)
     backend_selection = SourceFiles(output, root='backend/src', tests_root='backend/tests')
     context_index = project_index(output,
@@ -147,6 +306,7 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
             'test_requirement', 'convention', 'file'),
         file_roots=('frontend/src', 'frontend/tests', 'backend/src', 'backend/tests'))
     accepted = []
+    implemented = set()
     verified_process = set()
     pending_verification = any(check['status'] == 'FAILED'
         for check in process_report.get('verification', {}).values())
@@ -169,6 +329,19 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                 'ui_interfaces': {pid: {key: page[key] for key in ('route', 'root', 'elements')}
                     for pid, page in context['page_subtrees'].items()},
                 'schema': related_schema(schema, apis.values())}
+            if primary:
+                task['test_count_hint'] = max_tests
+                task['parent_requirements'] = []
+                parent = parents.get(rid)
+                while parent is not None:
+                    if tree.requirements[parent]['description']:
+                        task['parent_requirements'].insert(0, tree.requirements[parent])
+                    parent = parents.get(parent)
+                task['named_role_controls'] = [
+                    {'role': role, 'name': name} for role, name in sorted(declared_role_names(task))]
+                entry['target_triggers'] = sorted(design['requirements'].get(rid, ()))
+                entry['original_requirement_hash'] = digest(
+                    [task['original_requirement'], task['parent_requirements']])
             if not task['ui_interfaces']:
                 entry.update(status='FAILED', error='No UI interface available for independent requirement acceptance; not verified')
                 continue
@@ -179,6 +352,8 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
             def compile_suite():
                 if not (output / path).is_file():
                     raise ValueError('Create the supplied acceptance test_path')
+                if primary:
+                    normalize_exact_role_locators(output, path, task)
                 result = checks.typecheck([path], full_source=False)
                 if result['returncode']:
                     raise ValueError(result['output'])
@@ -221,18 +396,21 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                 agent = run_file_agent(model, INSTRUCTIONS, task, workspace, compile_suite,
                     max_turns, console, label + ' / Generation', include_conventions=False)
                 entry['generation_turns'] = agent['turns']
-            elif previous.get('requirements', {}).get(rid, {}).get('oracle_policy') != ORACLE_POLICY_VERSION:
+            elif (prior := previous.get('requirements', {}).get(rid, {})).get('oracle_policy') != ORACLE_POLICY_VERSION or (
+                    primary and prior.get('original_requirement_hash') != entry['original_requirement_hash']):
                 # Existing suites may encode the old generated-URL oracle. Review
-                # them against the original requirement before application repair.
-                _, turns, _ = review_suite({'review_reason': 'acceptance_oracle_policy_changed',
+                # them also when the original requirement changed under a stable ID.
+                reason = ('acceptance_oracle_policy_changed' if prior.get('oracle_policy') != ORACLE_POLICY_VERSION
+                    else 'original_requirement_changed')
+                verdict, turns, _ = review_suite({'review_reason': reason,
                     'policy_version': ORACLE_POLICY_VERSION}, 'Policy review')
+                if primary and verdict['cause'] in {'environment', 'uncertain'}:
+                    raise ValueError('Could not revalidate existing acceptance suite: ' + verdict['reason'])
                 entry['policy_review_turns'] = turns
             entry['oracle_policy'] = ORACLE_POLICY_VERSION
             result = checks.tests([path])
             entry["result"] = result
-            try:
-                require_acceptance(result)
-            except ValueError:
+            if test_run_status(result) != 'GREEN' and not primary:
                 # A separate, requirement-grounded review may correct the test, but its
                 # gate intentionally does not demand behavioral GREEN.
                 entry['initial_failure'] = result
@@ -262,18 +440,50 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                 acceptance_files = [acceptance_path(key) for key in [*accepted, rid]]
                 ui_files = [ui_test_path(pid) for pid in ui['pages']
                     if (output / ui_test_path(pid)).is_file()]
-                repair_task = {**task, **context, 'requirement': task['original_requirement'],
+                peer, paired = paired_action_context(ui, design, rid) if primary else (None, None)
+                if peer in tree.requirements and paired:
+                    context = {'page_subtrees': {**context['page_subtrees'], **paired['page_subtrees']},
+                        'triggers': {**context['triggers'], **paired['triggers']}}
+                    for trigger in paired['triggers'].values():
+                        aids.update(api_ids(trigger))
+                    apis = {aid: backend['apis'][aid] for aid in aids}
+                repair_task = {**context, 'requirement': task['original_requirement'], 'test_path': path,
                     'backend_apis': apis, 'target_trigger_ids': sorted(context['triggers']),
                     'repair_reason': 'final_verification_and_acceptance' if pending_verification else 'independent_acceptance',
                     'application_entrypoints': list(APPLICATION_ENTRYPOINTS),
                     'backend_entrypoints': {'registry': 'backend/src/api/register.ts',
                         'app': 'backend/src/app.ts', 'server': 'backend/src/server.ts'}}
+                handoff = trigger_handoff(output, design, rid, context['triggers'], implemented)
+                handlers = [entry['existing_handler'] for entry in handoff.values() if entry['existing_handler']]
+                if primary:
+                    repair_task.update(frontend_repair_context(context, apis))
+                    if peer in tree.requirements and paired:
+                        repair_task['paired_requirement'] = requirement_context(tree, peer)
+                    repair_task['parent_requirements'] = task['parent_requirements']
+                    repair_task['trigger_handoff'] = handoff
+                    repair_task['verified_http_api_ids'] = sorted(aid for aid in aids if aid in verified_http)
+                    repair_task['target_trigger_ids'] = [
+                        tid for tid, item in handoff.items() if item['status'] != 'reuse']
+                    if peer in tree.requirements and paired:
+                        repair_task['target_trigger_ids'] = sorted(set(repair_task['target_trigger_ids'])
+                            | set(design['requirements'].get(peer, ())))
                 repair_workspace = selection.workspace(
-                    paths=selection.paths('page', context['page_subtrees']),
-                    references=[path, *ui_files, FIXTURE, OBSERVATIONS, 'frontend/src/ui-runtime.ts',
+                    paths=[*selection.paths('page', context['page_subtrees']), *handlers],
+                    references=[path, *(['frontend/vite.config.ts', FIXTURE] if primary else
+                        [*ui_files, FIXTURE, OBSERVATIONS]), 'frontend/src/ui-runtime.ts',
                         *APPLICATION_ENTRYPOINTS, 'frontend/package.json', 'frontend/tsconfig.json'])
                 repair_workspace.allow_write = lambda relative: editable_runtime_path(output, relative)
-                backend_selection.include(repair_workspace, backend_selection.paths('api', aids))
+                prefer_edit = bool(primary and aids and aids <= verified_http.keys() and result.get('failed')
+                    and not result.get('errors'))
+                if primary:
+                    label_styles = label_stylesheets(repair_workspace)
+                    repair_workspace.files = {path for path in repair_workspace.files
+                        if not path.endswith('.css') or path in label_styles}
+                    repair_task['accessible_name_stylesheets'] = sorted(label_styles)
+                    if prefer_edit:
+                        repair_workspace = FirstEditWorkspace(repair_workspace)
+                else:
+                    backend_selection.include(repair_workspace, backend_selection.paths('api', aids))
                 reviewed_failures = failure_signatures(result)
                 extra_review = False
 
@@ -320,6 +530,10 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                     return evidence
 
                 def repair_feedback(value):
+                    if prefer_edit:
+                        if repair_workspace.received_initial_feedback:
+                            repair_workspace.edit_first = False
+                        repair_workspace.received_initial_feedback = True
                     return selection.feedback(repair_workspace, backend_selection.feedback(repair_workspace, value))
 
                 with implementation_task(output, entry, console, label + ' / Repair'):
@@ -328,14 +542,50 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                         'Preserve their original requirement outcomes and repair the real application. '
                         'Do not change consent defaults or persisted inputs to accommodate missing test actions '
                         'or invented expectations. Newly exposed assertions return to independent review.')
+                    if primary:
+                        instructions += (' The suite is the sole behavioral test for this requirement. '
+                            'Use trigger_handoff: reuse accepted actions and the listed existing handlers; '
+                            'do not recreate their files or add a second binding. Handler files are optional. '
+                            'Use the supplied HTTP method, path, request and response directly for frontend wiring. '
+                            'The backend routes listed in verified_http_api_ids already passed real HTTP tests. '
+                            'If the failure is a UI locator, navigation or missing event binding, start with the '
+                            'supplied frontend source; do not read the server, database initializer or route '
+                            'registry for those failures. Inspect backend sources only for concrete runtime evidence. '
+                            'When exact labels fail, check both literal punctuation and text generated by CSS '
+                            '::before/::after; keep decorative required markers out of accessible names. '
+                            'Before editing, provide diagnosis.cause=implementation or environment with a '
+                            'specific diagnosis.reason. If the failure appears to be a test defect or is uncertain, report diagnosis.cause '
+                            'as test_requirement_mismatch, test_overconstraint or uncertain with no edits '
+                            'so an isolated reviewer can check the suite.')
+                        if peer in tree.requirements and paired:
+                            instructions += (' The paired_requirement shares an existing control but uses a '
+                                'different API. Implement one event binding for the shared control using the '
+                                'applicable input and operation; satisfy both declared behaviors and preserve '
+                                'the paired session/navigation actions. The paired suite will run separately.')
+                        if prefer_edit:
+                            instructions += (' The first turn has all relevant source and verified interfaces; '
+                                'submit a concrete edit or a test-defect diagnosis directly. '
+                                'Use read_file for a specific remaining question only after gate feedback.')
                     turns_used = 0
                     repair_evidence = {'acceptance': result,
                         'verification': process_report.get('verification', {}) if pending_verification else {}}
+
+                    def route_oracle_problem(response):
+                        diagnosis = response.get('diagnosis')
+                        cause = diagnosis.get('cause') if isinstance(diagnosis, dict) else None
+                        if cause in {'test_requirement_mismatch', 'test_overconstraint', 'uncertain'}:
+                            raise ReviewInitialFailure(repair_evidence['acceptance'])
+                        if (cause not in {'implementation', 'environment'}
+                                or not isinstance(diagnosis.get('reason'), str) or not diagnosis['reason'].strip()):
+                            raise ValueError('Diagnose the application or runtime failure with concrete evidence before editing')
+
                     while turns_used < max_turns:
                         try:
                             repair = run_file_agent(model, instructions, repair_task, repair_workspace,
                                 repair_gate, max_turns - turns_used, console, label + ' / Repair',
-                                feedback=repair_evidence, feedback_filter=repair_feedback, context_index=context_index)
+                                feedback=repair_evidence, feedback_filter=repair_feedback, context_index=context_index,
+                                allow_discovery=not prefer_edit,
+                                validate_response=route_oracle_problem if primary else None)
                             turns_used += repair['turns']
                             accepted_checks = repair['checks']
                             break
@@ -345,7 +595,7 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                             new = failure_signatures(handoff.result) - reviewed_failures
                             own_failures = all(location and path.endswith('/' + location.removeprefix('Test file: ').replace('\\', '/'))
                                 for location, _, _ in new)
-                            if extra_review or not own_failures:
+                            if extra_review or not (own_failures or isinstance(handoff, ReviewInitialFailure)):
                                 raise ValueError('New independent acceptance failure requires separate review; '
                                     'stopped application repair') from handoff
                             extra_review = True
@@ -360,6 +610,10 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                                     if tested is not None and test_run_status(tested) == 'GREEN':
                                         # The corrected oracle passed. Remaining smoke,
                                         # runtime and build failures are still repairable.
+                                        repair_evidence = {'acceptance': tested, 'regression': error.feedback}
+                                        continue
+                                    if isinstance(handoff, ReviewInitialFailure) and tested is not None:
+                                        reviewed_failures.update(failure_signatures(tested))
                                         repair_evidence = {'acceptance': tested, 'regression': error.feedback}
                                         continue
                                     raise ValueError('Independent acceptance still fails after the bounded test correction') from error
@@ -388,6 +642,7 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                 save_json(arc_dir / 'frontend_e2e.json', process_report)
             entry.update(status='GREEN', result=result)
             accepted.append(rid)
+            implemented.update(design['requirements'].get(rid, ()))
         except (ValueError, RuntimeError) as error:
             entry.update(status='FAILED', error=str(error))
         finally:

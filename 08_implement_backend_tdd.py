@@ -1,8 +1,9 @@
 """Step 08: implement backend APIs against real-server HTTP acceptance suites."""
 
 import json
+import re
 from contextlib import ExitStack
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from infrastructure.shared.agent.context import SourceFiles
 from infrastructure.shared.agent.discovery import project_index
@@ -18,7 +19,7 @@ from infrastructure.shared.models.text import TextModel
 from infrastructure.utils.presentation.console import DemoConsole
 from infrastructure.utils.presentation.logging import console_log
 from infrastructure.shared.project.dependencies import install_dependencies
-from infrastructure.utils.files import save_json
+from infrastructure.utils.files import save_json, save_text
 from infrastructure.shared.project.git import checkpoint
 
 
@@ -58,9 +59,11 @@ fixture arguments or password encodings. Initialization loads db/seeds/ENTITY.sq
 existing prerequisites instead of assuming empty tables or duplicating identities. Arrange
 scenario-specific absence/conflicting states in this isolated database. Do not invoke
 another requirement's registration/creation API to manufacture Given data.
-Read concrete existing files only. The support module and supplied SQL are already in
-input.files. Do not read the backend/tests directory or guess a missing test file;
-use the supplied paths or discover a specific file candidate first.
+Use the support module, table DDL, initializer, seed loader and relevant seed files
+already in input.files. A comment-only SQL file has no seed rows. The canonical API
+contract defines the URL; the runtime files already show the initialization sequence.
+If test_path_exists is false, create it. Start with the test edit. Do not call read_file
+for source already included in input.files.
 
 Within max_tests cover meaningful success and critical requirement-defined rejection.
 Assert relevant persisted results/forbidden writes with SQL where needed; HTTP is the
@@ -92,23 +95,17 @@ Use the supplied test utilities and generated tests to understand existing fixtu
 conventions. Preserve compatibility when reading those records. Production storage must
 satisfy the contract and keep plaintext passwords out of persistent data.
 Preserve required comparison rules and shared credential/header conventions.
+ApiRequest body and query values are unknown: assign them to locals and narrow their
+types before string, date, or password operations.
 
 Do not start a server, open another database, change schema or seed production data.
 Use installed dependencies and Node standard modules. Implement the operation directly;
 no DB-access primitive layer is generated. The compiler owns the HTTP test runner and fixture.
 Predefined credentials in seeds/*.sql use seed_password_hash; its scrypt encoding is
 defined in backend/src/db/seed.ts and must remain readable by credential handlers.
-Read and edit task.api_wiring.registry to import this handle and register its actual
-Express route, adapting params/query/body/headers and status/body/headers between HTTP
-and the handler contract. Inspect app/server wiring when needed. The compiler will not
-regenerate these files. Preserve all existing routes and middleware; insert/update this
-API without replacing unrelated registrations or introducing duplicate routes. Extend
-the existing registerApis implementation; never rebuild its body or route map with only
-the current API. Earlier requirement implementations remain mandatory. Translate
-contract path placeholders (including {name}) to syntax accepted by the installed router;
-pass concrete parameter names and values to handle. Preserve cookies and error handling.
-Use read_file with optional line ranges, to inspect related wiring; read only the relevant missing
-lines and use a unique exact edit_file replacement. Do not start the production server in source code.
+Use known_api_files for existing handler locations instead of guessing endpoint filenames.
+Do not read a missing implementation file: create the target when implementation_path_exists
+is false. Keep related routes and handlers intact.
 Preserve unrelated behavior when repairing other supplied writable backend sources.
 Generated tests can be corrected against requirement and API evidence when their
 expectations or fixtures are wrong or overly strict. Preserve required success and
@@ -120,6 +117,107 @@ the required success and rejection cases.
 The compiler starts the real server and runs current/accepted HTTP API suites after TypeScript checks. Repair implementation
 failures without weakening assertions or detecting tests to fake business behavior.
 """
+
+MANUAL_WIRING = """
+Use task.api_wiring.registry to register the route through its existing registerApis function.
+Use a local edit inside the registry, preserving imports, previous routes and middleware.
+Adapt Express params/query/body/headers to ApiRequest and forward response status, body and headers.
+Translate path placeholders into Express route parameters. Inspect app/server wiring only
+when a failing check names it. Read only missing source evidence.
+"""
+
+COMPILER_WIRING = """
+Implement only the handler and any necessary business helpers. The compiler binds the canonical
+HTTP method/path and adapts request and response values before the real test gate. The registry,
+app and server are read-only for this task. A test's pre-implementation 404 is expected.
+Start with the handler edit using input.files; do not read source already supplied there.
+"""
+
+ROUTE_SEGMENT = r"(?:[A-Za-z0-9._~-]+|:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})"
+HTTP_METHODS = {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
+PROTECTED_WIRING = {REGISTER_PATH, "backend/src/app.ts", "backend/src/server.ts"}
+
+
+def compiler_routes(output, apis):
+    """Select deterministic wiring only for the untouched registry and simple Express paths."""
+    template = Path(__file__).resolve().parent / "infrastructure/shared/project/templates" / REGISTER_PATH
+    registry = output / REGISTER_PATH
+    if not (registry.is_file() and template.is_file()
+            and registry.read_text(encoding="utf-8-sig") == template.read_text(encoding="utf-8-sig")):
+        return None
+    routes = {}
+    patterns = set()
+    for aid, api in apis.items():
+        signature = api.get("signature", {})
+        path, method = signature.get("path"), signature.get("method")
+        if (method not in HTTP_METHODS or not isinstance(path, str)
+                or not re.fullmatch(r"/api(?:/" + ROUTE_SEGMENT + r")+", path)):
+            return None
+        if method in {"GET", "HEAD"} and path.lower() == "/api/health":
+            return None
+        path = re.sub(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", r":\1", path)
+        parameters = re.findall(r":([A-Za-z_][A-Za-z0-9_]*)", path)
+        pattern = (method, re.sub(r":[A-Za-z_][A-Za-z0-9_]*", ":", path).lower())
+        if len(parameters) != len(set(parameters)) or pattern in patterns:
+            return None
+        patterns.add(pattern)
+        routes[aid] = (method.lower(), path)
+    return routes
+
+
+def write_compiler_registry(output, routes, paths):
+    """Regenerate only the compiler-owned HTTP adapter from accepted and current handlers."""
+    imports, registrations = [], []
+    # Literal routes must be registered before overlapping parameterized routes.
+    for index, aid in enumerate(sorted(paths, key=lambda key: (
+            routes[key][0] != "head",
+            tuple(part.startswith(":") for part in routes[key][1].split("/")), routes[key], key))):
+        method, route = routes[aid]
+        path = PurePosixPath(paths[aid]).relative_to(PurePosixPath(REGISTER_PATH).parent)
+        module = "./" + str(path.with_suffix(".js"))
+        imports.append(f'import {{ handle as handler{index} }} from {json.dumps(module)};')
+        registrations.append(f'  app.{method}({json.dumps(route)}, adapter(handler{index}, connection));')
+    source = """import type { Express, RequestHandler } from "express";
+import type Database from "better-sqlite3";
+import type { ApiHandler } from "./types.js";
+""" + "\n".join(imports) + """
+
+function adapter(handle: ApiHandler, connection: Database.Database): RequestHandler {
+  return async (request, response, next) => {
+    try {
+      const headers = Object.fromEntries(Object.entries(request.headers).map(([key, value]) =>
+        [key, Array.isArray(value) ? value.join(", ") : value]));
+      const result = await handle({ params: request.params as Record<string, string>,
+        query: request.query as Record<string, unknown>, body: request.body ?? {}, headers }, connection);
+      response.status(result.status);
+      for (const [name, value] of Object.entries(result.headers ?? {})) response.setHeader(name, value);
+      const type = response.getHeader("content-type");
+      if (result.body === undefined || result.status === 204 || result.status === 304) response.end();
+      else if (typeof result.body === "string" && typeof type === "string" && !type.includes("json")) response.send(result.body);
+      else response.json(result.body);
+    } catch (error) {
+      next(error);
+    }
+  };
+}
+
+export function registerApis(app: Express, connection: Database.Database): void {
+""" + "\n".join(registrations) + "\n}\n"
+    save_text(output / REGISTER_PATH, source)
+
+
+def scoped_feedback(selection, workspace, compiler_owned):
+    if compiler_owned:
+        allow = workspace.allow_write
+        workspace.allow_write = lambda path: path not in PROTECTED_WIRING and allow(path)
+        workspace.writable.difference_update(PROTECTED_WIRING)
+
+    def filter_feedback(value):
+        feedback = selection.feedback(workspace, value)
+        if compiler_owned:
+            workspace.writable.difference_update(PROTECTED_WIRING)
+        return feedback
+    return filter_feedback
 
 
 def implement_backend_tdd(arc_dir: Path, pause: bool = False, max_turns: int = 10, max_tests: int = 5) -> dict:
@@ -147,6 +245,8 @@ def implement_backend_tdd(arc_dir: Path, pause: bool = False, max_turns: int = 1
         print("No Backend API Primitives require implementation; no tests or model calls were run.")
         return report
     checks = BackendChecks(output)
+    routes = compiler_routes(output, contracts["apis"])
+    wired = {}
     selection = SourceFiles(output, root="backend/src", tests_root="backend/tests")
     model = TextModel() if contracts["apis"] else None
     context_index = project_index(output,
@@ -213,15 +313,21 @@ def implement_backend_tdd(arc_dir: Path, pause: bool = False, max_turns: int = 1
                     context = {
                         "api_id": aid, "api": api,
                         "requirement": requirement_context(tree, rid),
-                        "db_schema": related_schema(schema, [api]), "test_path": relative if (output / relative).is_file() else None,
+                        "db_schema": related_schema(schema, [api]), "test_path": relative,
+                        "test_path_exists": (output / relative).is_file(),
                         "max_tests": max_tests,
                         "support_module": TEST_SUPPORT_PATH,
                     }
+                    sources = supplied_sources(output, api, schema)
+                    seeds = [path.replace("/tables/", "/seeds/") for path in sources if "/tables/" in path]
+                    runtime_sources = [path for path in
+                        ["backend/src/db/initialize.ts", "backend/src/db/seed.ts", *seeds]
+                        if (output / path).is_file()]
                     workspace = selection.workspace(target=("backend_test", aid), existing=relative,
-                        references=[*supplied_sources(output, api, schema)])
+                        references=[*sources, *runtime_sources])
                     agent = run_file_agent(model, TEST_INSTRUCTIONS, context, workspace,
                         test_gate, max_turns, console, label + " / Test Generation",
-                        feedback_filter=lambda value: selection.feedback(workspace, value), context_index=context_index)
+                        feedback_filter=scoped_feedback(selection, workspace, routes is not None), context_index=context_index)
                     for owner in api_owners:
                         report["tests"].setdefault(owner, {})[aid] = targets[aid]
                     report["agents"][f"tests:{aid}"] = {"turns": agent["turns"]}
@@ -243,6 +349,8 @@ def implement_backend_tdd(arc_dir: Path, pause: bool = False, max_turns: int = 1
                         return {"typecheck": compiled, "tests": tested}
 
                     def implementation_gate():
+                        if routes is not None:
+                            write_compiler_registry(output, routes, {**wired, aid: handler_path})
                         result = implementation_checks()
                         if result["typecheck"]["returncode"]:
                             raise ValueError(result["typecheck"]["output"])
@@ -250,20 +358,38 @@ def implement_backend_tdd(arc_dir: Path, pause: bool = False, max_turns: int = 1
                         return result
 
                     api_entry = selected_path(output, "api", aid)
+                    handler_path = f"backend/src/api/{aid}.ts" if routes is not None else api_entry
                     current = implementation_checks() if api_entry and (output / api_entry).is_file() else agent["checks"]
                     context = {
                         "api_id": aid, "api": api, "db_schema": related_schema(schema, [api]),
                         "requirement": requirement_context(tree, rid),
-                        "implementation_path": selected_path(output, "api", aid),
-                        "api_wiring": {"registry": REGISTER_PATH, "app": "backend/src/app.ts",
-                            "server": "backend/src/server.ts"},
+                        "implementation_path": handler_path,
+                        "implementation_path_exists": bool(handler_path and (output / handler_path).is_file()),
+                        "known_api_files": {key: path for key in contracts["apis"]
+                            if (path := selected_path(output, "api", key)) and (output / path).is_file()},
                     }
-                    workspace = selection.workspace(target=("api", aid), paths=[REGISTER_PATH],
-                        references=[*files_by_api[aid], *supplied_sources(output, api, schema)])
-                    agent = run_file_agent(model, IMPLEMENT_INSTRUCTIONS, context, workspace,
+                    credentials = {field for mode in ("read", "write") for field in api[mode]
+                        if "password" in field.casefold()}
+                    credential_sources = [path for key in accepted
+                        if credentials.intersection(contracts["apis"][key]["write"])
+                        and (path := selected_path(output, "api", key)) and (output / path).is_file()]
+                    if routes is None:
+                        context["api_wiring"] = {"registry": REGISTER_PATH, "app": "backend/src/app.ts",
+                            "server": "backend/src/server.ts"}
+                    else:
+                        context["compiler_wires_http"] = True
+                    workspace = selection.workspace(target=("api", aid),
+                        paths=[REGISTER_PATH] if routes is None else [handler_path],
+                        references=[*files_by_api[aid], *sources, *runtime_sources, *credential_sources])
+                    if routes is not None:
+                        workspace.target.path = handler_path
+                    wiring_instructions = COMPILER_WIRING if routes is not None else MANUAL_WIRING
+                    agent = run_file_agent(model, IMPLEMENT_INSTRUCTIONS + wiring_instructions, context, workspace,
                         implementation_gate, max_turns, console, aid + " / Implementation", feedback=current,
-                        feedback_filter=lambda value: selection.feedback(workspace, value), context_index=context_index)
+                        feedback_filter=scoped_feedback(selection, workspace, routes is not None), context_index=context_index)
                     accepted.append(aid)
+                    if routes is not None:
+                        wired[aid] = handler_path
                     result = agent["checks"]["tests"]
                     report["green"][aid] = {key: result[key] for key in ("tests", "pass", "fail")}
                     report["agents"][f"implementation:{aid}"] = {"turns": agent["turns"]}

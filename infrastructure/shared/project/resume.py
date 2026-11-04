@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 from pathlib import Path
 
@@ -78,15 +79,44 @@ def snapshot(root, *, application=False):
     return result
 
 
-def code_fingerprint():
+def code_manifest():
     root = Path(__file__).resolve().parents[3]
     paths = sorted([*root.glob("*.py"), *(p for p in root.joinpath("infrastructure").rglob("*")
         if p.is_file() and "__pycache__" not in p.parts)])
-    hashes = {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
+    hashes = {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
     for name in ("uv.lock", "pyproject.toml"):
         if (root / name).is_file():
             hashes[name] = hashlib.sha256((root / name).read_bytes()).hexdigest()
-    return digest(hashes)
+    return hashes
+
+
+def prefix_compatible(previous, identity, code_files):
+    """Only reuse a checkpoint that ended before a known stage-local code change."""
+    old_identity = previous.get("identity", {})
+    if any(old_identity.get(key) != identity[key] for key in ("input_hash", "configuration_hash")):
+        return False
+    if old_identity == identity:
+        return True
+    old_files = previous.get("code_files")
+    if not isinstance(old_files, dict) or digest(old_files) != old_identity.get("code_hash"):
+        return False
+    changed = {p for p in old_files.keys() | code_files.keys() if old_files.get(p) != code_files.get(p)}
+    affected = []
+    for path in changed:
+        # Shared helpers can affect earlier stages; never infer their scope here.
+        match = re.fullmatch(r"(08|09|10|11|12)_[^/]+\.py", path)
+        if match:
+            affected.append(int(match[1]))
+        elif path.startswith("infrastructure/stages/frontend/triggers/"):
+            name = path.removeprefix("infrastructure/stages/frontend/triggers/")
+            affected.append(12 if name in {"acceptance.py", "implementation.py", "e2e_runtime.py",
+                "scope.py", "context.py", "testing.py"} else 11)
+        else:
+            return False
+    if not affected:
+        return False
+    return all(re.match(r"^\d\d(?:_|$)", stage) and int(stage[:2]) < min(affected)
+        for stage in previous["stages"])
 
 
 class ResumeManager:
@@ -96,15 +126,22 @@ class ResumeManager:
         self.enabled = enabled
         input_snapshot = snapshot(input_dir)
         self.unsafe_inputs = any(value.startswith("symlink") for value in input_snapshot.values())
-        self.identity = {"input_hash": digest(input_snapshot), "code_hash": code_fingerprint(),
+        self.code_files = code_manifest()
+        self.identity = {"input_hash": digest(input_snapshot), "code_hash": digest(self.code_files),
             "configuration_hash": digest(configuration or {})}
-        self.state = {"schema_version": 1, "identity": self.identity, "stages": {}, "design_tasks": {}, "file_tasks": {}, "snapshot": {}}
+        self.state = {"schema_version": 1, "identity": self.identity, "code_files": self.code_files,
+            "stages": {}, "design_tasks": {}, "file_tasks": {}, "snapshot": {}}
         self.previous = self.load_state()
+        self.compatible = prefix_compatible(self.previous, self.identity, self.code_files)
         self.rerun = self.plan_rerun(changed_nodes)
         self.reused = []
         self._started = False
-        if enabled and self.previous.get("identity") == self.identity:
-            self.state = deepcopy(self.previous)
+        if enabled and not self.rerun["all"]:
+            for key in ("stages", "snapshot"):
+                self.state[key] = deepcopy(self.previous[key])
+            if self.previous.get("identity") == self.identity:
+                for key in ("design_tasks", "file_tasks"):
+                    self.state[key] = deepcopy(self.previous[key])
 
     @contextmanager
     def activate(self):
@@ -147,7 +184,7 @@ class ResumeManager:
 
     def plan_rerun(self, changed_nodes=()):
         stages = self.previous.get("stages", {})
-        if (not self.enabled or self.previous.get("identity") != self.identity or self.graph.data.get("pending")
+        if (not self.enabled or not self.compatible or self.graph.data.get("pending")
                 or self.unsafe_inputs or not self.graph.data["nodes"]
                 or any("stage:" + stage not in self.graph.data["nodes"] for stage in stages)
                 or any(entry.get("status") not in BAD_STATUS

@@ -568,6 +568,76 @@ class FrontendFlow(unittest.TestCase):
         self.assertEqual(set(context["triggers"]), {"TR-INPUT", "TR-SAVE", "TR-COUNT"})
         self.assertEqual(self.interactions["requirements"]["REQ-A"], ["TR-INPUT", "TR-SAVE"])
 
+    def test_shared_trigger_change_must_name_prior_consumers_even_if_effects_match(self):
+        from infrastructure.stages.frontend.triggers.design import apply_decomposition, validate_shared_changes
+        current = apply_decomposition(empty_triggers(self.tree),
+            {"triggers": {"TR-SAVE": self.interactions["triggers"]["TR-SAVE"]},
+                "requirement_triggers": ["TR-SAVE"], "step_triggers": {}}, "REQ-A")
+        reuse = {"triggers": {}, "requirement_triggers": ["TR-SAVE"], "step_triggers": {}}
+        validate_shared_changes(current, reuse, "REQ-B", ["REQ-A"])
+        changed = deepcopy(current["triggers"]["TR-SAVE"])
+        changed["action"][0]["description"] = "Updated implementation guidance"
+        proposal = {**reuse, "triggers": {"TR-SAVE": changed}}
+        with self.assertRaisesRegex(ValueError, "shared_changes"):
+            validate_shared_changes(current, proposal, "REQ-B", ["REQ-A"])
+        proposal["shared_changes"] = {"TR-SAVE": ["REQ-A"]}
+        validate_shared_changes(current, proposal, "REQ-B", ["REQ-A"])
+        updated = apply_decomposition(current, proposal, "REQ-B")
+        self.assertEqual(updated["owners"]["TR-SAVE"], "REQ-A")
+        self.assertEqual(updated["requirements"]["REQ-B"], ["TR-SAVE"])
+
+    def test_original_dependency_supplies_the_page_without_assigning_its_triggers(self):
+        from importlib import import_module
+        from infrastructure.stages.frontend.triggers.synthesis import synthesize_triggers
+        self.raw["children"][1]["dependencies"] = ["REQ-C"]
+        save_json(self.output / "requirements.yaml", self.raw)
+        dependencies = import_module("11_design_frontend_triggers").original_dependencies(self.output)
+        self.obligations["steps"] = {sid: self.obligations["requirements"][rid]
+            for rid in self.tree.leaves for sid in self.tree.own_steps[rid]}
+        save_json(self.arc / "db_obligations.json", self.obligations)
+        seen = {}
+
+        def generate(_, payload):
+            rid = payload["requirement"]["id"]
+            seen[rid] = set(payload["ui"]["pages"])
+            ids = self.interactions["requirements"][rid]
+            return {"triggers": {tid: self.interactions["triggers"][tid] for tid in ids},
+                "requirement_triggers": ids, "step_triggers": {sid: ids for sid in self.tree.own_steps[rid]}}
+
+        result = synthesize_triggers(self.arc, self.ui, self.tree, self.backend,
+            self.tree.requirements, Mock(generate_json=generate), Mock(), dependencies=dependencies)
+        self.assertEqual(seen["REQ-B"], {"editor", "summary"})
+        self.assertNotIn("TR-COUNT", result["requirements"]["REQ-B"])
+
+    def test_compatible_new_api_branch_does_not_overwrite_the_prior_trigger(self):
+        from infrastructure.stages.frontend.triggers.synthesis import synthesize_triggers
+        self.backend["requirements"]["REQ-B"] = ["API-SAVE-TAGGED"]
+        self.backend["apis"]["API-SAVE-TAGGED"] = {"read": [], "write": ["Note.id", "Note.text", "Note.tag"]}
+        self.obligations["requirements"]["REQ-B"] = {"read": [], "write": ["Note.id", "Note.text", "Note.tag"]}
+        self.obligations["steps"] = {sid: self.obligations["requirements"][rid]
+            for rid in self.tree.leaves for sid in self.tree.own_steps[rid]}
+        save_json(self.arc / "db_obligations.json", self.obligations)
+        calls = []
+
+        def generate(_, payload):
+            rid = payload["requirement"]["id"]
+            calls.append(rid)
+            ids = self.interactions["requirements"][rid]
+            definitions = {tid: deepcopy(self.interactions["triggers"][tid]) for tid in ids}
+            if rid == "REQ-B":
+                definitions["TR-SAVE"]["action"][0]["api"] = "API-SAVE-TAGGED"
+                self.assertIn("API-SAVE-TAGGED", payload["unique_api_evidence"])
+            return {"triggers": definitions, "requirement_triggers": ids,
+                "step_triggers": {sid: ids for sid in self.tree.own_steps[rid]}}
+
+        result = synthesize_triggers(self.arc, self.ui, self.tree, self.backend,
+            self.tree.requirements, Mock(generate_json=generate), Mock())
+        self.assertEqual(calls, self.tree.leaves)
+        self.assertEqual(result["triggers"]["TR-SAVE"]["action"][0]["api"], "API-SAVE")
+        new_id = next(tid for tid in result["requirements"]["REQ-B"] if tid.startswith("TR-SAVE-"))
+        self.assertEqual(result["owners"][new_id], "REQ-B")
+        self.assertEqual(result["triggers"][new_id]["action"][0]["api"], "API-SAVE-TAGGED")
+
     def test_destination_page_does_not_pull_its_other_business_triggers_into_requirement(self):
         triggers = deepcopy(self.interactions)
         triggers["triggers"]["TR-FUTURE"] = {"source": "UI-BACK", "event": "click", "read": [], "write": [], "action": []}

@@ -13,7 +13,7 @@ from infrastructure.utils.files import save_json
 from infrastructure.shared.project.git import checkpoint
 from infrastructure.shared.usage.recorder import UsageRecorder, current_recorder, record_event
 from infrastructure.shared.artifacts.dependency_graph import DependencyGraph
-from infrastructure.shared.project.resume import ResumeManager, runtime_environment, snapshot
+from infrastructure.shared.project.resume import BAD_STATUS, ResumeManager, runtime_environment, snapshot
 from infrastructure.shared.agent.experiments import OptimizationOptions, optimization_scope
 from infrastructure.shared.agent.failures import observe_failure
 
@@ -22,14 +22,17 @@ class Compiler:
     """Own shared paths, configuration, and results for one compilation."""
 
     def __init__(self, input_dir: Path, output_dir: Path, model_log: bool = False, port: int = 3000,
-            *, resume=False, resume_preview=False, changed_nodes=(), optimizations=None) -> None:
+            *, resume=False, resume_preview=False, changed_nodes=(), optimizations=None, until_stage=12) -> None:
         if not 1 <= port <= 65535:
             raise ValueError("Backend port must be between 1 and 65535")
         self.input_dir = Path(input_dir).expanduser().resolve()
         self.output_dir = Path(output_dir).expanduser().resolve()
         self.arc_dir = self.output_dir / ".arc"
         self.model_log = model_log
+        if not 0 <= until_stage <= 12:
+            raise ValueError("Last stage must be between 0 and 12")
         self.port = port
+        self.until_stage = until_stage
         self.resume_enabled, self.resume_preview = resume or resume_preview, resume_preview
         self.changed_nodes = tuple(changed_nodes)
         self.optimizations = optimizations or OptimizationOptions()
@@ -125,36 +128,33 @@ class Compiler:
         self.report = {"status": "RUNNING", "stages": {}}
         show_panel("Requirement compiler | Pipeline",
             f"Input: {self.input_dir}\nOutput: {self.output_dir}\nPasses: 13\nDetailed model logs: {'enabled' if self.model_log else 'disabled'}")
-        self.artifacts["project_files"] = self._run(
-            "00_project_initialization", "project_initialization", self.output_dir, port=self.port)
-        self.artifacts["requirements"] = self._run(
-            "01_explore_requirement", "explore_requirement", self.input_dir, self.arc_dir)
-        self.artifacts["db_schema"] = self._run(
-            "02_build_db_schema", "build_db_schema", self.arc_dir)
-        self.artifacts["db_obligations"] = self._run(
-            "03_infer_db_obligations", "infer_db_obligations", self.arc_dir)
-        self.artifacts["db_obligations"] = self._run(
-            "04_check_db_obligations", "check_db_obligations", self.arc_dir)
-        self.artifacts["db_implementations"] = self._run(
-            "05_implement_db", "implement_db", self.arc_dir)
-        self.artifacts["backend_apis"] = self._run(
-            "06_design_backend_apis", "design_backend_apis", self.arc_dir)
-        self.artifacts["backend_apis"] = self._run(
-            "07_check_backend_apis", "check_backend_apis", self.arc_dir)
-        self.artifacts["backend_checks"] = self._run(
-            "08_implement_backend_tdd", "implement_backend_tdd", self.arc_dir)
-        self.artifacts["ui_design"] = self._run(
-            "09_design_ui", "design_frontend_ui", self.input_dir, self.arc_dir)
-        self.artifacts["ui_checks"] = self._run(
-            "10_implement_ui", "implement_frontend_ui", self.input_dir, self.arc_dir)
-        self.artifacts["frontend_triggers"] = self._run(
-            "11_design_frontend_triggers", "design_frontend_triggers", self.input_dir, self.arc_dir)
-        self.artifacts["frontend_e2e"] = self._run(
-            "12_implement_frontend_tdd", "implement_frontend_triggers", self.input_dir, self.arc_dir)
+        stages = (
+            ("project_files", "00_project_initialization", "project_initialization", self.output_dir),
+            ("requirements", "01_explore_requirement", "explore_requirement", self.input_dir, self.arc_dir),
+            ("db_schema", "02_build_db_schema", "build_db_schema", self.arc_dir),
+            ("db_obligations", "03_infer_db_obligations", "infer_db_obligations", self.arc_dir),
+            ("db_obligations", "04_check_db_obligations", "check_db_obligations", self.arc_dir),
+            ("db_implementations", "05_implement_db", "implement_db", self.arc_dir),
+            ("backend_apis", "06_design_backend_apis", "design_backend_apis", self.arc_dir),
+            ("backend_apis", "07_check_backend_apis", "check_backend_apis", self.arc_dir),
+            ("backend_checks", "08_implement_backend_tdd", "implement_backend_tdd", self.arc_dir),
+            ("ui_design", "09_design_ui", "design_frontend_ui", self.input_dir, self.arc_dir),
+            ("ui_checks", "10_implement_ui", "implement_frontend_ui", self.input_dir, self.arc_dir),
+            ("frontend_triggers", "11_design_frontend_triggers", "design_frontend_triggers", self.input_dir, self.arc_dir),
+            ("frontend_e2e", "12_implement_frontend_tdd", "implement_frontend_triggers", self.input_dir, self.arc_dir),
+        )
+        for number, (artifact, module, function, *args) in enumerate(stages):
+            if number > self.until_stage:
+                break
+            options = {"port": self.port} if number == 0 else {}
+            self.artifacts[artifact] = self._run(module, function, *args, **options)
+            if self.until_stage < 12 and self.report["stages"][module]["status"] in BAD_STATUS:
+                break
         self.current_stage = None
         incomplete = [stage for stage, result in self.report["stages"].items()
             if result["status"] in {"FAILED", "COMPLETED_WITH_FAILURES"}]
-        self.report["status"] = "COMPLETED_WITH_FAILURES" if incomplete else "GREEN"
+        self.report["status"] = ("COMPLETED_WITH_FAILURES" if incomplete else
+            "GREEN_PREFIX" if self.until_stage < 12 else "GREEN")
         from infrastructure.shared.artifacts.coverage import build_coverage_matrix
         build_coverage_matrix(self.output_dir)
         save_json(self.arc_dir / "compilation.json", self.report)

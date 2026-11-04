@@ -60,6 +60,17 @@ uv run main.py input --output-dir outputs/demo --resume
 
 Preview writes `.arc/resume-plan.json` without running stages. Resume checks input, compiler/template, configuration, artifact and source versions. Changed intermediate designs are preserved and checked by their consumers. Shared stages rerun conservatively; accepted task reuse still checks the current context and acceptance gate.
 
+For local stage experiments, build a prefix and advance it in the same output directory:
+
+```bash
+uv run main.py input -o outputs/local-stages --until-stage 07
+uv run main.py input -o outputs/local-stages --resume --until-stage 08
+uv run main.py input -o outputs/local-stages --resume --until-stage 11
+uv run main.py input -o outputs/local-stages --resume
+```
+
+Keep a copy of the prefix directory (including `.arc`) before advancing it when comparing multiple implementations. A saved prefix can survive a change confined to a known later stage. Changes to shared code, input or runtime configuration require revalidation. The prefix runs still require a model wherever a stage generates new output.
+
 Context serialization uses compact JSON and literal evidence by default. `--context-dedup` experimentally replaces duplicate evidence with reversible `$context_ref` pointers; compare full-run tokens and acceptance results before enabling it. `--no-context-dedup` remains supported. Hard budgets, explicit task-model routing, accepted-response caching and reviewed simple schema proposals are opt-in experiments; see [implementation details and options](improvement-plan.md#135-实验开关).
 
 ```bash
@@ -147,8 +158,8 @@ flowchart TB
     REQ --> DB[02–05 Schema、读写义务、校验与数据库实现]
     DB --> API[06–08 API 设计、契约检查与后端 TDD]
     API --> UI[09–10 页面设计、UI 实现与展示测试]
-    UI --> INTERACTION[11–12 Trigger 设计、交互实现与 E2E]
-    INTERACTION --> ACCEPT[依据原始需求的独立验收]
+    UI --> INTERACTION[11 触发器设计与共享动作归属]
+    INTERACTION --> ACCEPT[12 基于原始需求的 E2E、交互实现与回归]
     ACCEPT --> REPORT[应用、编译报告与覆盖关联]
 
     subgraph SHARED[各阶段共用的运行服务]
@@ -176,7 +187,7 @@ flowchart TB
 | 02–05 | 增量维护 Schema，推断数据库读写义务，校验字段与义务，实现 SQL 和初始化入口 | `db_schema.json`、`db_obligations.json`、数据库检查报告；验证真实 SQLite 初始化、重复初始化和服务启动 |
 | 06–08 | 设计 API，检查契约与读写覆盖，生成 HTTP 测试并实现后端 | `backend_apis.json`、`backend_tdd.json`；检查 TypeScript、真实 HTTP 和数据库结果 |
 | 09–10 | 设计页面、元素与数据关系，生成 UI 和展示测试 | `ui_design.json`、`ui_checks.json`；检查页面结构、编译与展示行为 |
-| 11–12 | 设计事件与 API/UI 动作，实现交互，运行 E2E 和独立验收 | `frontend_triggers.json`、`frontend_e2e.json`、`independent_acceptance.json` |
+| 11–12 | 设计共享动作，以原始需求的浏览器用例驱动交互实现与回归 | `frontend_triggers.json`、`frontend_e2e.json`、`independent_acceptance.json` |
 
 阶段内部使用两类执行循环：
 
@@ -224,7 +235,7 @@ flowchart TB
 
 验收覆盖设计和运行两端。视觉证据先校验结构；第 02 阶段在 Schema 合并后校验字段类型、外键目标和需求字段关联。数据库实体、API、页面和触发器的标识只要会用于生成文件名，就在设计阶段检查路径兼容性和大小写冲突。通过检查的产物才交给下游。
 
-TypeScript、SQL、HTTP、UI 与 E2E 检查实际应用产物。第 12 阶段按任务给出的 `implementation_paths` 验收必交文件，多个文件可以复用共享逻辑。对有 UI 接口的业务需求，独立验收重新读取原始 YAML 作为测试依据，测试生成与审查使用受限文件范围，应用修复阶段将独立验收套件作为只读证据。
+TypeScript、SQL、HTTP、UI 与 E2E 检查实际应用产物。第 11 阶段记录触发器归属，修改已有共享动作时须声明受影响的需求并重新检查义务。第 12 阶段传递动作复用信息和已存在的处理器路径，允许多个触发器由同一个组件或函数实现。每个需求的一套浏览器验收以原始 YAML 为依据，同时用于实现和最终回归；测试生成与审查使用受限文件范围，应用修复只读验收套件。
 
 恢复分为两层：
 

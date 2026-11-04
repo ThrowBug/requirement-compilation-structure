@@ -81,6 +81,12 @@ class RunReports(unittest.TestCase):
             step = result["requirements"]["R"]["steps"]["S"]
             self.assertEqual(step["candidate_suites"], ["frontend/tests/save.spec.ts"])
             self.assertEqual(step["assertion_coverage"], "NOT_MEASURED")
+            suite = "frontend/tests/e2e/acceptance/save.spec.ts"
+            entry = {"status": "GREEN", "test_path": suite}
+            save_json(root / ".arc/independent_acceptance.json", {"requirements": {"R": entry}})
+            save_json(root / ".arc/frontend_e2e.json", {"requirements": {"R": entry}})
+            step = build_coverage_matrix(root)["requirements"]["R"]["steps"]["S"]
+            self.assertEqual(step["candidate_suites"], [suite])
 
     def test_missing_requirements_are_explicitly_unknown(self):
         with TemporaryDirectory() as directory:

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from infrastructure.shared.artifacts.dependency_graph import DependencyGraph
 from infrastructure.shared.project.resume import ResumeManager, snapshot
@@ -76,3 +77,28 @@ class ResumeJournal(unittest.TestCase):
             preview = ResumeManager(root, root / "input", graph, enabled=True)
             self.assertTrue(preview.should_run("09"))
             self.assertEqual(preview.path.read_bytes(), original)
+
+    def test_prefix_reused_after_stage_local_edit_but_not_shared_edit(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            graph = DependencyGraph(root)
+            for stage in ("00_project_initialization", "07_check_backend_apis"):
+                graph.register("stage:" + stage, complete=True, valid=True)
+            graph.flush()
+            base = {"08_implement_backend_tdd.py": "before", "infrastructure/shared/agent/loop.py": "before"}
+            with patch("infrastructure.shared.project.resume.code_manifest", return_value=base):
+                manager = ResumeManager(root, root / "input", graph)
+                for stage in ("00_project_initialization", "07_check_backend_apis"):
+                    manager.mark_task_done(stage, "stage", {"status": "GREEN"})
+                manager.save_design("old-task", {"proposal": True})
+            with patch("infrastructure.shared.project.resume.code_manifest",
+                    return_value={**base, "08_implement_backend_tdd.py": "after"}):
+                resumed = ResumeManager(root, root / "input", graph, enabled=True)
+                self.assertFalse(resumed.should_run("07_check_backend_apis"))
+                self.assertTrue(resumed.should_run("08_implement_backend_tdd"))
+                self.assertIsNone(resumed.design_proposal("old-task"))
+                self.assertFalse(resumed.state["design_tasks"])
+            with patch("infrastructure.shared.project.resume.code_manifest",
+                    return_value={**base, "infrastructure/shared/agent/loop.py": "after"}):
+                resumed = ResumeManager(root, root / "input", graph, enabled=True)
+                self.assertTrue(resumed.should_run("07_check_backend_apis"))

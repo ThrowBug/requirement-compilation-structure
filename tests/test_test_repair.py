@@ -1,6 +1,8 @@
 """Repair generated tests against requirements and keep UI smoke checks minimal."""
 from tool_fixtures import propose_files
 
+import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -15,6 +17,45 @@ from infrastructure.utils.files import save_text
 
 
 class TestRepair(unittest.TestCase):
+    def test_locked_browser_database_retries_with_a_fresh_directory(self):
+        from infrastructure.stages.frontend.triggers.testing import E2EChecks
+        with TemporaryDirectory() as directory:
+            output = Path(directory)
+            checks = E2EChecks(output)
+            locked = "Error: EBUSY: resource busy or locked, unlink 'arc-e2e-run/app.db'"
+            good = json.dumps({"stats": {"expected": 1, "unexpected": 0, "skipped": 0, "flaky": 0},
+                "suites": [], "errors": []})
+            with patch.object(checks, "execute", side_effect=[
+                    {"returncode": 1, "stdout": "", "stderr": locked, "output": locked},
+                    {"returncode": 0, "stdout": good, "stderr": "", "output": good}]) as execute:
+                result = checks.tests(["frontend/tests/e2e/acceptance/sample.spec.ts"])
+            self.assertEqual(result["passed"], 1)
+            self.assertEqual(result["prior_cleanup_error"], locked)
+            self.assertNotEqual(execute.call_args_list[0].kwargs["env"]["ARC_E2E_TEMP_ROOT"],
+                execute.call_args_list[1].kwargs["env"]["ARC_E2E_TEMP_ROOT"])
+
+    @unittest.skipUnless(os.environ.get('ARC_DB_TEST_NODE_MODULES'), 'Needs local TypeScript')
+    def test_literal_role_normalization_is_exact_and_idempotent(self):
+        from infrastructure.stages.frontend.triggers.acceptance import normalize_exact_role_locators
+        with TemporaryDirectory() as directory:
+            output = Path(directory)
+            (output / "node_modules").symlink_to(Path(os.environ['ARC_DB_TEST_NODE_MODULES']).resolve())
+            path = "browser.spec.ts"
+            save_text(output / path, """page.getByRole('link', { name: 'HOME' });
+page.getByRole("textbox", { name: "Name" });
+page.getByRole("textbox", { name: "Name lookup" });
+page.getByRole('link', { name: /HOME/i });
+""")
+            task = {"original_requirement": {
+                "description": '"HOME"(role=link) and "Name"(role=textbox) are exact.', "steps": []}}
+            normalize_exact_role_locators(output, path, task)
+            source = (output / path).read_text()
+            self.assertEqual(source.count("exact: true"), 2)
+            self.assertIn('{ name: "Name lookup" }', source)
+            self.assertIn('{ name: /HOME/i }', source)
+            normalize_exact_role_locators(output, path, task)
+            self.assertEqual((output / path).read_text(), source)
+
     def test_existence_suite_does_not_turn_dependency_state_or_option_objects_into_text_assertions(self):
         from test_frontend_flow import frontend_fixture
         _, _, ui, _, _, _ = frontend_fixture()

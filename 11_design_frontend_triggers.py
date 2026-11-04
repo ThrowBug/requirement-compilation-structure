@@ -2,6 +2,7 @@
 
 from contextlib import ExitStack
 from pathlib import Path
+import yaml
 
 from infrastructure.utils.cli import create_parser, resolve_directories
 from infrastructure.stages.frontend.context import load_frontend_context, load_ui_design, behavior_contexts
@@ -11,6 +12,19 @@ from infrastructure.shared.models.text import TextModel
 from infrastructure.utils.presentation.console import DemoConsole
 from infrastructure.utils.presentation.logging import console_log
 from infrastructure.utils.files import save_json
+
+
+def original_dependencies(input_dir):
+    """Keep declared prerequisites available even though the normalized tree omits them."""
+    raw = yaml.safe_load((input_dir / "requirements.yaml").read_text(encoding="utf-8-sig"))
+    result, pending = {}, [raw]
+    while pending:
+        node = pending.pop()
+        dependencies = node.get("dependencies")
+        if isinstance(dependencies, list):
+            result[node["id"]] = [dependency for dependency in dependencies if isinstance(dependency, str)]
+        pending.extend(node.get("children", ()))
+    return result
 
 
 def design_frontend_triggers(input_dir: Path, arc_dir: Path, pause: bool = False, max_attempts: int = 10) -> dict:
@@ -25,7 +39,8 @@ def design_frontend_triggers(input_dir: Path, arc_dir: Path, pause: bool = False
         console.show("Step 11 | No UI triggers", "Empty trigger design saved; no model calls were made.")
         return result
     result = synthesize_triggers(arc_dir, ui, tree, backend,
-        behavior_contexts(contexts), TextModel(), console, max_attempts)
+        behavior_contexts(contexts), TextModel(), console, max_attempts,
+        dependencies=original_dependencies(input_dir))
     console.show("Step 11 | Trigger design complete", f"Triggers: {len(result['triggers'])}\nSaved: {arc_dir / 'frontend_triggers.json'}\nApplication code and UI/data design were not changed. Step 12 implements triggers through E2E TDD.")
     return result
 

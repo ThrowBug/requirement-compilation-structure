@@ -1,6 +1,7 @@
 """Exercise model-edited HTTP wiring after normal compiler refreshes."""
 from tool_fixtures import propose_files
 
+from importlib import import_module
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,54 @@ from infrastructure.utils.files import save_text
 
 
 class ApiWiring(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get('ARC_DB_TEST_NODE_MODULES'), 'Set ARC_DB_TEST_NODE_MODULES for real HTTP checks')
+    def test_compiler_registry_preserves_http_contract_and_manual_wiring(self):
+        stage = import_module('08_implement_backend_tdd')
+        with TemporaryDirectory() as directory:
+            output = Path(directory)
+            initialize_project(output)
+            (output / 'node_modules').symlink_to(Path(os.environ['ARC_DB_TEST_NODE_MODULES']).resolve())
+            apis = {key: {'signature': {'method': 'GET', 'path': path}} for key, path in
+                (('READ', '/api/books/{bookId}'), ('RECENT', '/api/books/recent'))}
+            routes = stage.compiler_routes(output, apis)
+            self.assertEqual(routes['READ'], ('get', '/api/books/:bookId'))
+            paths = {key: f'backend/src/api/{key}.ts' for key in apis}
+            save_text(output / paths['READ'], '''import type { ApiHandler } from "./types.js";
+export const handle: ApiHandler = async request => ({ status: 200,
+  body: { id: request.params.bookId, q: request.query.q, header: request.headers["x-client"] },
+  headers: { "Set-Cookie": ["first=one; Path=/", "second=two; Path=/"] } });
+''')
+            save_text(output / paths['RECENT'], 'export async function handle() { return { status: 204, body: undefined }; }')
+            stage.write_compiler_registry(output, routes, paths)
+            self.assertIsNone(stage.compiler_routes(output, apis))
+            built = subprocess.run(['node', 'node_modules/typescript/bin/tsc', '--noEmit', '-p', 'backend/tsconfig.json'],
+                cwd=output, capture_output=True, text=True, timeout=30)
+            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+            save_text(output / 'check.mjs', '''import assert from "node:assert/strict";
+import { once } from "node:events";
+import Database from "better-sqlite3";
+import { createApp } from "./backend/src/app.ts";
+const db = new Database(":memory:");
+const server = createApp(db).listen(0, "127.0.0.1");
+try {
+  await once(server, "listening");
+  const base = "http://127.0.0.1:" + server.address().port;
+  const item = await fetch(base + "/api/books/an%20id?q=hello", { headers: { "X-Client": "demo" } });
+  assert.equal(item.status, 200);
+  assert.deepEqual(await item.json(), { id: "an id", q: "hello", header: "demo" });
+  assert.deepEqual(item.headers.getSetCookie(), ["first=one; Path=/", "second=two; Path=/"]);
+  const recent = await fetch(base + "/api/books/recent");
+  assert.equal(recent.status, 204);
+  assert.equal(await recent.text(), "");
+} finally {
+  await new Promise(resolve => server.close(resolve));
+  db.close();
+}
+''')
+            result = subprocess.run(['node', '--import', 'tsx', 'check.mjs'], cwd=output,
+                capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     @unittest.skipUnless(os.environ.get('ARC_DB_TEST_NODE_MODULES'), 'Set ARC_DB_TEST_NODE_MODULES for real HTTP checks')
     def test_agent_edits_survive_refresh_and_connect_client_to_real_http_and_sqlite(self):
         with TemporaryDirectory() as temporary:

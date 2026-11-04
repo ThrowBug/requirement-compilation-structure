@@ -63,7 +63,7 @@ class CompilerPipeline(unittest.TestCase):
             self.assertIsNone(compiler.current_stage)
             self.assertIsNone(session_info())
             self.assertEqual(sys.argv, original_argv)
-            log = (compiler.output_dir / 'compiler.log').read_text()
+            log = (compiler.output_dir / 'compiler.log').read_text(encoding='utf-8')
             self.assertIn('Stage 00', log)
             self.assertIn('Stage 12', log)
 
@@ -103,14 +103,15 @@ class CompilerPipeline(unittest.TestCase):
             self.assertTrue((compiler.arc_dir / 'requirements.json').is_file())
             self.assertFalse((compiler.output_dir / 'model_calls.jsonl').exists())
 
-    def test_all_real_passes_compose_for_a_no_operations_requirement(self):
-        """Exercise artifact handoffs through all passes with no remote calls or npm installation."""
+    def test_all_real_passes_compose_with_a_cached_prefix(self):
+        """Exercise artifact handoffs and confirm the resumed passes do not repeat earlier calls."""
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / 'input'
             source.mkdir()
             (source / 'requirements.yaml').write_text('id: ROOT\nname: Empty module\ndescription:\n  text: No business operations, data or pages.\nscenarios: []\nchildren: []\n')
-            compiler = Compiler(source, root / 'application')
+            prefix = Compiler(source, root / 'application', until_stage=7)
+            compiler = Compiler(source, prefix.output_dir, resume=True)
             proposals = {
                 '02_build_db_schema': {'entities': {}, 'related_fields': []},
                 '03_infer_db_obligations': {'requirement': {'read': [], 'write': []}, 'steps': {}},
@@ -126,7 +127,12 @@ class CompilerPipeline(unittest.TestCase):
                 install = stack.enter_context(patch.object(import_module('08_implement_backend_tdd'), 'install_dependencies'))
                 stack.enter_context(patch.object(import_module('05_implement_db'), 'verify_database_runtime',
                     return_value={'status': 'GREEN'}))
+                prefix.compile()
+                self.assertEqual(prefix.report['status'], 'GREEN_PREFIX')
+                self.assertEqual(len(prefix.report['stages']), 8)
+                self.assertFalse((prefix.arc_dir / 'backend_tdd.json').exists())
                 compiler.compile()
+            self.assertEqual(len(compiler.resume_manager.reused), 8)
             install.assert_called_once_with(compiler.output_dir)
             self.assertEqual(sum(model.return_value.generate_json.call_count for model in models), 4)
             self.assertEqual(compiler.artifacts['backend_checks']['status'], 'NO_APIS')

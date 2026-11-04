@@ -188,6 +188,7 @@ def project_index(output, *, kinds, file_roots=()):
     from infrastructure.stages.requirements.tree import RequirementTree
     from infrastructure.stages.backend.context import requirement_context
     from infrastructure.stages.frontend.ui.design import owners, data_symbols
+    from infrastructure.shared.project.entrypoints import implementation_path_buckets
 
     def artifact(name, default):
         return read_artifact(output / '.arc', name) if (output / '.arc' / name).is_file() else default
@@ -220,7 +221,12 @@ def project_index(output, *, kinds, file_roots=()):
             if 'requirement' in kinds:
                 result['requirement'] = requirements
         if 'test_requirement' in kinds:
-            paths = artifact('implementation_paths.json', {})
+            path_kinds = []
+            if backend_tests:
+                path_kinds.append('backend_test')
+            if frontend_tests:
+                path_kinds.append('e2e_test')
+            paths = implementation_path_buckets(output, path_kinds)
             test_owners = {}
             if backend_tests:
                 for aid, path in paths.get('backend_test', {}).items():

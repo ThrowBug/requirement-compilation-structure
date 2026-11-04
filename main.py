@@ -23,6 +23,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Default generated backend port and frontend API proxy target (default: 3000)")
     parser.add_argument("--resume", action="store_true", help="Reuse version-checked completed stages and validated design proposals")
     parser.add_argument("--resume-preview", action="store_true", help="Write .arc/resume-plan.json without running stages")
+    parser.add_argument("--until-stage", type=int, choices=range(13), default=12, metavar="00-12",
+        help="Stop after this stage and save a reusable prefix in the output directory")
     parser.add_argument("--changed-node", action="append", default=[], help="Explicit dependency node to invalidate (repeatable)")
     dedup = parser.add_mutually_exclusive_group()
     dedup.add_argument("--context-dedup", action="store_true", help="Experimentally encode repeated evidence as JSON Pointer references")
@@ -66,6 +68,8 @@ def main(argv: list[str] | None = None) -> None:
     options = {}
     if args.resume or args.resume_preview or args.changed_node:
         options.update(resume=args.resume, resume_preview=args.resume_preview, changed_nodes=args.changed_node)
+    if args.until_stage != 12:
+        options["until_stage"] = args.until_stage
     if args.optimizations != OptimizationOptions():
         options["optimizations"] = args.optimizations
     compiler = Compiler(args.requirement_path, args.output_dir, model_log=args.model_log, port=args.port, **options)

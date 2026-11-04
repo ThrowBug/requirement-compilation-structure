@@ -50,9 +50,11 @@ class FileTools:
         task = {**task}
         if self.target:
             task["file_target"] = self.target.context()
+            key = "test_path" if self.target.kind.endswith("test") else "implementation_path"
             if self.target.path:
-                key = "test_path" if self.target.kind.endswith("test") else "implementation_path"
                 task[key] = self.target.path
+            if key + "_exists" in task:
+                task[key + "_exists"] = bool(task.get(key) and self.path(task[key]).is_file())
         for key, kind in (("implementation_paths", "trigger"), ("page_paths", "page")):
             if isinstance(task.get(key), dict):
                 task[key] = {identity: selected_path(self.output, kind, identity) or path
@@ -60,7 +62,8 @@ class FileTools:
         return task
 
     def schemas(self):
-        return deepcopy([item[1] for item in TOOL_REGISTRY.values()])
+        return deepcopy([item[1] for name, item in TOOL_REGISTRY.items()
+            if name != "bind_target" or self.target is not None])
 
     def effect(self, calls):
         """Registered effects determine whether to continue reading or run acceptance."""

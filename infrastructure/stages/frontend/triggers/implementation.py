@@ -234,13 +234,8 @@ If a necessary correction is outside tool scope, explain the exact blocker in di
 """
 
 
-def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts,
-        model, console, report, max_turns=10, max_tests=2):
-    """Implement design one requirement at a time through real-app E2E TDD.
-
-    Prepare dependencies/runtime, generate initial key scenario tests, then
-    integrate and repair the current requirement before advancing. Regress
-    accepted smoke scenarios, build the app, and update the caller's report."""
+def prepare_trigger_runtime(arc_dir, backend, ui, design, console, max_tests=2):
+    """Prepare a single real browser runtime for the full acceptance stage."""
     output = arc_dir.parent.resolve()
     prepare_frontend(output)
     prepare_e2e(output, backend)
@@ -250,16 +245,13 @@ def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts
     checks.install_browser()
     checkpoint(output, stage="12", task="runtime", action="Prepare real-app browser tests and isolated database fixtures",
         details={"pages": list(ui["pages"]), "trigger_ids": list(design["triggers"])})
-    accepted, implemented = [], set()
+    return output, checks
+
+
+def check_frontend_baseline(arc_dir, ui, checks, model, console, report, max_turns):
+    """Recover inherited type and UI failures before generating business suites."""
+    output = arc_dir.parent.resolve()
     ui_checks = FrontendChecks(output)
-    selection = SourceFiles(output, ui)
-    backend_selection = SourceFiles(output, root="backend/src", tests_root="backend/tests")
-    context_index = project_index(output,
-        kinds=("schema", "api", "page", "ui_element", "ui_data", "trigger", "requirement",
-            "test_requirement", "convention", "file"),
-        file_roots=("frontend/src", "frontend/tests", "backend/src", "backend/tests"))
-    report["status"] = "IMPLEMENTING"
-    save_json(arc_dir / "frontend_e2e.json", report)
     baseline_files = [ui_test_path(pid) for pid in ui["pages"]
         if (output / ui_test_path(pid)).is_file()]
 
@@ -281,6 +273,12 @@ def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts
         try:
             baseline = baseline_gate()
         except (ValueError, RuntimeError) as error:
+            selection = SourceFiles(output, ui)
+            backend_selection = SourceFiles(output, root="backend/src", tests_root="backend/tests")
+            context_index = project_index(output,
+                kinds=("schema", "api", "page", "ui_element", "ui_data", "trigger", "requirement",
+                    "test_requirement", "convention", "file"),
+                file_roots=("frontend/src", "frontend/tests", "backend/src", "backend/tests"))
             workspace = selection.workspace(paths=APPLICATION_ENTRYPOINTS,
                 references=["frontend/src/ui-runtime.ts", "frontend/package.json",
                     "frontend/tsconfig.json", "frontend/playwright.ui.config.ts"])
@@ -304,6 +302,23 @@ def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts
             report["baseline"]["repair_turns"] = repair["turns"]
         report["baseline"].update(status="GREEN", checks=baseline)
     save_json(arc_dir / "frontend_e2e.json", report)
+
+
+def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts,
+        model, console, report, max_turns=10, max_tests=2):
+    """Legacy process suite runner, retained for separately exercising wiring."""
+    output, checks = prepare_trigger_runtime(arc_dir, backend, ui, design, console, max_tests)
+    accepted, implemented = [], set()
+    ui_checks = FrontendChecks(output)
+    selection = SourceFiles(output, ui)
+    backend_selection = SourceFiles(output, root="backend/src", tests_root="backend/tests")
+    context_index = project_index(output,
+        kinds=("schema", "api", "page", "ui_element", "ui_data", "trigger", "requirement",
+            "test_requirement", "convention", "file"),
+        file_roots=("frontend/src", "frontend/tests", "backend/src", "backend/tests"))
+    report["status"] = "IMPLEMENTING"
+    save_json(arc_dir / "frontend_e2e.json", report)
+    check_frontend_baseline(arc_dir, ui, checks, model, console, report, max_turns)
     for number, rid in enumerate(tree.leaves, 1):
         tids = set(design["requirements"][rid])
         steps = tree.own_steps[rid]
@@ -460,13 +475,13 @@ def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts
     return verify_frontend(arc_dir, tree, backend, ui, console, report)
 
 
-def verify_frontend(arc_dir, tree, backend, ui, console, report):
+def verify_frontend(arc_dir, tree, backend, ui, console, report, *, suites=None):
     """Check current files again after implementation or independent acceptance repair."""
     output = arc_dir.parent.resolve()
     checks = E2EChecks(output)
     ui_checks = FrontendChecks(output)
     console.show("Final frontend verification", "Run available functional suites, UI regression and both builds against current sources.")
-    files = [test_path(rid, output) for rid in tree.leaves
+    files = suites if suites is not None else [test_path(rid, output) for rid in tree.leaves
         if report["requirements"].get(rid, {}).get("status") != "NO_TRIGGERS"
         and (output / test_path(rid, output)).is_file()]
     ui_files = [ui_test_path(pid) for pid in ui["pages"] if (output / ui_test_path(pid)).is_file()]
@@ -475,7 +490,7 @@ def verify_frontend(arc_dir, tree, backend, ui, console, report):
         if (path := selected_path(output, "backend_test", aid)) and (output / path).is_file()]
     verification = final_checks(console,
         typecheck=(lambda: checks.typecheck(files), None),
-        e2e=(lambda: checks.tests(files), require_green)) if files else final_checks(console,
+        e2e=(lambda: checks.tests(files), require_stable)) if files else final_checks(console,
             typecheck=(lambda: checks.typecheck([]), None))
     if ui_files:
         verification.update(final_checks(console, ui=(lambda: ui_checks.tests(ui_files), require_green)))
@@ -493,3 +508,9 @@ def verify_frontend(arc_dir, tree, backend, ui, console, report):
     complete_report(report, report["requirements"].values(), verification)
     save_json(arc_dir / "frontend_e2e.json", report)
     return report
+
+
+def require_stable(result):
+    require_green(result)
+    if result.get("skipped") or result.get("flaky"):
+        raise ValueError("Final functional suites include skipped or unstable tests")

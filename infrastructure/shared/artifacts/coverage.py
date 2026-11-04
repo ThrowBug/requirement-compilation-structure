@@ -28,10 +28,16 @@ def build_coverage_matrix(output):
     for rid in tree.leaves:
         aids = backend.get("requirements", {}).get(rid, [])
         suites = [paths.get("backend_test", {}).get(aid) for aid in aids]
-        suites += [paths.get("e2e_test", {}).get(rid)]
+        process = frontend.get("requirements", {}).get(rid, {})
+        independent = acceptance.get("requirements", {}).get(rid, {})
+        suite = independent.get("test_path")
+        if suite:
+            suites.append(suite)
+        if not suite or process.get("test_path") != suite:
+            suites.append(paths.get("e2e_test", {}).get(rid))
         entry = {"suites": sorted(set(path for path in suites if path)), "steps": {},
-            "process_status": frontend.get("requirements", {}).get(rid, {}).get("status", "UNKNOWN"),
-            "independent_status": acceptance.get("requirements", {}).get(rid, {}).get("status", "UNKNOWN")}
+            "process_status": process.get("status", "UNKNOWN"),
+            "independent_status": independent.get("status", "UNKNOWN")}
         for sid in tree.own_steps[rid]:
             entry["steps"][sid] = {"triggers": triggers.get("steps", {}).get(sid, []),
                 "candidate_suites": entry["suites"], "assertion_coverage": "NOT_MEASURED"}

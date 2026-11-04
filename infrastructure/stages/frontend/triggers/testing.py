@@ -38,20 +38,32 @@ class E2EChecks(FrontendChecks):
         for relative in files:
             if not (self.output / relative).resolve().is_relative_to(self.output / "frontend/tests/e2e"):
                 raise ValueError("Run only the selected E2E test suites")
-        # The Node runner creates a child directory here. Python also removes
-        # it after timeout/interruption, so test databases never persist.
-        with TemporaryDirectory(prefix="arc-e2e-owner-") as temporary:
-            env = {**os.environ, "ARC_E2E_TEMP_ROOT": temporary}
-            print("Playwright E2E | real backend + isolated database | " + ", ".join(files), flush=True)
+        cleanup_attempt = None
+        for attempt in range(2):
+            # The Node runner owns cleanup and reports a nonzero exit on failure.
+            # On Windows, Python must not replace that result with a second
+            # PermissionError while an owned child is still closing the database.
+            with TemporaryDirectory(prefix="arc-e2e-owner-", ignore_cleanup_errors=True) as temporary:
+                env = {**os.environ, "ARC_E2E_TEMP_ROOT": temporary}
+                print("Playwright E2E | real backend + isolated database | " + ", ".join(files), flush=True)
+                try:
+                    result = self.execute([RUNNER, *files], env=env)
+                except (ValueError, RuntimeError, OSError) as error:
+                    return {"returncode": 1, "output": str(error), "errors": [str(error)],
+                        "passed": 0, "failed": 0, "files": {}}
             try:
-                result = self.execute([RUNNER, *files], env=env)
-            except (ValueError, RuntimeError, OSError) as error:
-                return {"returncode": 1, "output": str(error), "errors": [str(error)],
-                    "passed": 0, "failed": 0, "files": {}}
-        try:
-            return parse_playwright_result(result, include_files=True)
-        except ValueError as error:
-            # A runner/startup failure may not produce reporter JSON. Keep its logs
-            # as repair evidence instead of rejecting the generated business test.
-            return {**result, "returncode": result["returncode"] or 1,
-                "errors": [str(error)], "passed": 0, "failed": 0, "files": {}}
+                parsed = parse_playwright_result(result, include_files=True)
+            except ValueError as error:
+                # Keep startup/runner diagnostics even without Playwright JSON.
+                parsed = {**result, "returncode": result["returncode"] or 1,
+                    "errors": [str(error)], "passed": 0, "failed": 0, "files": {}}
+            stderr = result.get("stderr", "")
+            locked = (result["returncode"] and re.search(
+                r"\b(?:EBUSY|EPERM|EACCES)\b[^\r\n]*arc-e2e-[^\r\n]*app\.db", stderr, re.I))
+            if locked and not parsed.get("failed") and attempt == 0:
+                cleanup_attempt = stderr[-2000:]
+                print("E2E temporary SQLite cleanup was blocked; retry once with a new isolated database.", flush=True)
+                continue
+            if cleanup_attempt:
+                parsed["prior_cleanup_error"] = cleanup_attempt
+            return parsed

@@ -30,6 +30,10 @@ class FileGateHandoff(Exception):
     """A stage gate requests another task before any further file repair."""
 
 
+class ProviderTransportUnavailable(Exception):
+    """The model request failed after provider retries; no edit can repair it."""
+
+
 @agent_task("file")
 def run_file_agent(model, instructions: str, task: dict, files: FileTools, gate,
         max_turns: int, console, label: str, feedback=None, feedback_filter=None, context_index=None,
@@ -188,6 +192,14 @@ def run_file_agent(model, instructions: str, task: dict, files: FileTools, gate,
             handoff.turns = turn
             raise
         except (*RESPONSE_ERRORS, RuntimeError, OSError) as error:
+            # The provider client already retries transport failures. Sending the
+            # same request as "repair feedback" cannot repair TLS or a timeout.
+            if isinstance(error, RuntimeError) and error.__cause__ is not None:
+                from openai import APIConnectionError, APIStatusError
+                cause = error.__cause__
+                if isinstance(cause, APIConnectionError) or (isinstance(cause, APIStatusError)
+                        and (cause.status_code in {401, 403, 408, 429} or cause.status_code >= 500)):
+                    raise ProviderTransportUnavailable(str(error)) from error
             confirm_response(model, False)
             failure = observe_failure(error, round=turn, will_retry=turn < max_turns,
                 phase="acceptance" if checking else "protocol")

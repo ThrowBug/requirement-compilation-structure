@@ -180,7 +180,9 @@ class FileToolTests(unittest.TestCase):
     def test_registry_defines_the_model_schema_and_execution(self):
         tools = FileTools(self.root)
         schema = {item["tool"]: item for item in tools.schemas()}
-        self.assertEqual(set(schema), set(TOOL_REGISTRY))
+        self.assertEqual(set(schema), set(TOOL_REGISTRY) - {"bind_target"})
+        target_tools = FileTools.for_target(self.root, "api", "API-A")
+        self.assertEqual({item["tool"] for item in target_tools.schemas()}, set(TOOL_REGISTRY))
         self.assertIn("operation", schema["edit_file"]["parameters"]["required"])
         self.assertNotIn(str(self.root), json.dumps(tools.schemas()))
         with self.assertRaises(FileToolError) as failed:

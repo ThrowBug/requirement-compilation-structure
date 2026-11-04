@@ -129,6 +129,31 @@ class TelemetryContracts(unittest.TestCase):
 
 
 class GraphContracts(unittest.TestCase):
+    def test_new_page_paths_do_not_invalidate_a_completed_backend(self):
+        from infrastructure.shared.agent.discovery import project_index
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            graph = DependencyGraph(root)
+            index = root / ".arc/implementation_paths.json"
+            backend = "08_implement_backend_tdd"
+            ui = "09_design_ui"
+            with graph.activate():
+                with graph.stage(backend):
+                    save_json(index, {"backend_test": {"A": "backend/tests/a.test.ts"}})
+                    project_index(root, kinds=("test_requirement",), file_roots=("backend/tests",)).records()
+                with graph.stage(ui):
+                    pass
+                with graph.stage("10_implement_ui"):
+                    save_json(index, {"backend_test": {"A": "backend/tests/a.test.ts"},
+                        "page": {"P": "frontend/src/Page.tsx"}})
+                self.assertTrue(graph.data["nodes"]["stage:" + backend]["valid"])
+                self.assertTrue(graph.data["nodes"]["stage:" + ui]["valid"])
+                with graph.stage("12_implement_frontend_tdd"):
+                    save_json(index, {"backend_test": {"A": "backend/tests/b.test.ts"},
+                        "page": {"P": "frontend/src/Page.tsx"}})
+                self.assertFalse(graph.data["nodes"]["stage:" + backend]["valid"])
+                self.assertFalse(graph.data["nodes"]["stage:" + ui]["valid"])
+
     def test_shared_api_page_and_schema_impact_preserves_unrelated_requirements(self):
         with TemporaryDirectory() as directory:
             graph = DependencyGraph(directory)

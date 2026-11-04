@@ -12,6 +12,18 @@ FILE_ROOTS = {"api": "backend/src", "page": "frontend/src", "trigger": "frontend
     "backend_test": "backend/tests", "e2e_test": "frontend/tests/e2e"}
 
 
+def implementation_path_buckets(output: Path, kinds) -> dict:
+    """Read selected path namespaces without depending on the entire shared file."""
+    from infrastructure.shared.artifacts.dependency_graph import current_graph
+    index = output / ".arc/implementation_paths.json"
+    paths = json.loads(index.read_text(encoding="utf-8-sig")) if index.is_file() else {}
+    selected = {kind: paths.get(kind, {}) for kind in kinds}
+    if graph := current_graph():
+        for kind, bucket in selected.items():
+            graph.observe_implementation_paths(kind, bucket)
+    return selected
+
+
 def selected_path(output: Path, kind: str, identity: str) -> str | None:
     """Read the implementation path selected for a model ID."""
     index = output / ".arc/implementation_paths.json"

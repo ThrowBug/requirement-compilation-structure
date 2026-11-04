@@ -166,6 +166,127 @@ class IndependentAcceptance(unittest.TestCase):
             self.assertEqual(report['status'], 'GREEN')
             self.assertIn('/api/original', str(seen[0]['task']['original_requirement']))
 
+    def test_primary_suite_drives_implementation_without_duplicate_generation_or_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir, ui, triggers, backend = self.setup_workspace(root)
+            source = 'frontend/src/pages/editor.tsx'
+            save_text(root / source, 'form does not save')
+            handler = 'frontend/src/triggers/TR-SAVE.ts'
+            save_text(root / handler, 'export function save() {}')
+            save_json(root / '.arc/backend_tdd.json', {'green': {aid: {} for aid in backend['apis']}})
+            generated, edits = [], []
+
+            def generate(prompt, payload):
+                task = payload['task']
+                if 'original_requirement' in task:
+                    self.assertIn('acceptance suite for ONE original requirement', prompt)
+                    generated.append(task['original_requirement']['id'])
+                    self.assertNotIn(source, payload['files'])
+                    return propose_files(root, [{'path': task['test_path'], 'content': 'save through browser'}])
+                self.assertEqual(task['trigger_handoff']['TR-SAVE']['existing_handler'], handler)
+                self.assertNotIn('bind_target', [tool['tool'] for tool in payload['tools']])
+                self.assertNotIn('read_file', [tool['tool'] for tool in payload['tools']])
+                self.assertNotIn('context_records', payload)
+                self.assertFalse(payload['files'][task['test_path']]['writable'])
+                edits.append(task['requirement']['id'])
+                return propose_files(root, [{'path': source, 'content': 'form saves'}],
+                    diagnosis={'cause': 'implementation', 'reason': 'Form is missing its save handler'})
+
+            checks = Mock()
+            checks.typecheck.return_value = {'returncode': 0}
+            checks.build.return_value = {'returncode': 0}
+            def browser(paths):
+                if acceptance_path('REQ-A') in paths and (root / source).read_text() != 'form saves':
+                    return {'returncode': 1, 'passed': 0, 'failed': 1, 'failures': ['Save failed']}
+                return {'returncode': 0, 'passed': len(paths), 'failed': 0}
+            checks.tests.side_effect = browser
+            with patch('infrastructure.stages.frontend.triggers.acceptance.E2EChecks', return_value=checks), \
+                    patch('infrastructure.stages.frontend.triggers.acceptance.BackendChecks'), \
+                    patch('infrastructure.stages.frontend.triggers.acceptance.FrontendChecks'):
+                report = run_independent_acceptance(input_dir, root / '.arc', {'entities': {}}, backend, ui,
+                    triggers, Mock(generate_json=generate), Mock(),
+                    process_report={'requirements': {}, 'verification': {}}, primary=True)
+            self.assertEqual(report['status'], 'GREEN')
+            self.assertEqual(generated, ['REQ-A', 'REQ-B', 'REQ-C'])
+            self.assertEqual(edits, ['REQ-A'])
+            self.assertEqual((root / source).read_text(), 'form saves')
+
+    def test_primary_routes_a_suspect_test_to_the_isolated_reviewer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir, ui, triggers, backend = self.setup_workspace(root)
+            path = acceptance_path('REQ-A')
+            calls = []
+
+            def generate(prompt, payload):
+                task = payload['task']
+                if 'Review this independent acceptance test' in prompt:
+                    calls.append('isolated review')
+                    self.assertEqual(set(payload['allowed_read_paths']), set(payload['files']))
+                    return propose_files(root, [{'path': path, 'content': 'scoped selector'}],
+                        diagnosis={'cause': 'test_overconstraint', 'reason': 'The locator matched two permitted controls'})
+                if 'original_requirement' in task:
+                    text = 'ambiguous selector' if task['test_path'] == path else 'valid scenario'
+                    return propose_files(root, [{'path': task['test_path'], 'content': text}])
+                calls.append('implementation diagnosis')
+                return {'tool_calls': [], 'diagnosis': {'cause': 'test_overconstraint',
+                    'reason': 'Unscoped locator matches two legitimate controls'}}
+
+            checks = Mock()
+            checks.typecheck.return_value = {'returncode': 0}
+            checks.build.return_value = {'returncode': 0}
+            def browser(paths):
+                if path in paths and (root / path).read_text() == 'ambiguous selector':
+                    return {'returncode': 1, 'passed': 0, 'failed': 1, 'failures': ['Locator is ambiguous']}
+                return {'returncode': 0, 'passed': len(paths), 'failed': 0}
+            checks.tests.side_effect = browser
+            with patch('infrastructure.stages.frontend.triggers.acceptance.E2EChecks', return_value=checks), \
+                    patch('infrastructure.stages.frontend.triggers.acceptance.BackendChecks'), \
+                    patch('infrastructure.stages.frontend.triggers.acceptance.FrontendChecks'):
+                report = run_independent_acceptance(input_dir, root / '.arc', {'entities': {}}, backend, ui,
+                    triggers, Mock(generate_json=generate), Mock(),
+                    process_report={'requirements': {}, 'verification': {}}, primary=True)
+            self.assertEqual(report['status'], 'GREEN')
+            self.assertEqual(calls, ['implementation diagnosis', 'isolated review'])
+            self.assertEqual((root / path).read_text(), 'scoped selector')
+
+    def test_primary_revalidates_a_cached_suite_when_the_original_requirement_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir, ui, triggers, backend = self.setup_workspace(root)
+            calls = []
+
+            def generate(prompt, payload):
+                task = payload['task']
+                rid = task['original_requirement']['id']
+                if 'Review this independent acceptance test' in prompt:
+                    calls.append(('review', rid))
+                    self.assertEqual(payload['feedback'][0]['review_reason'], 'original_requirement_changed')
+                    return {'tool_calls': [], 'diagnosis': {'cause': 'implementation',
+                        'reason': 'This existing assertion already covers the clarified outcome'}}
+                calls.append(('generate', rid))
+                return propose_files(root, [{'path': task['test_path'], 'content': 'existing behavior'}])
+
+            checks = Mock()
+            checks.typecheck.return_value = {'returncode': 0}
+            checks.tests.return_value = {'returncode': 0, 'passed': 1, 'failed': 0}
+            with patch('infrastructure.stages.frontend.triggers.acceptance.E2EChecks', return_value=checks), \
+                    patch('infrastructure.stages.frontend.triggers.acceptance.BackendChecks'), \
+                    patch('infrastructure.stages.frontend.triggers.acceptance.FrontendChecks'):
+                def run():
+                    return run_independent_acceptance(input_dir, root / '.arc', {'entities': {}}, backend, ui,
+                        triggers, Mock(generate_json=generate), Mock(),
+                        process_report={'requirements': {}, 'verification': {}}, primary=True)
+                self.assertEqual(run()['status'], 'GREEN')
+                path = input_dir / 'requirements.yaml'
+                raw = yaml.safe_load(path.read_text())
+                raw['children'][0]['description'] += ' Show an error on empty text.'
+                path.write_text(yaml.safe_dump(raw))
+                calls.clear()
+                self.assertEqual(run()['status'], 'GREEN')
+                self.assertEqual(calls, [('review', 'REQ-A')])
+
     def test_existing_url_bound_suites_are_reviewed_once_against_original_requirements(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

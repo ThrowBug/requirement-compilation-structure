@@ -5,7 +5,7 @@ from pathlib import Path
 
 from infrastructure.utils.cli import create_parser, resolve_directories
 from infrastructure.stages.frontend.triggers.context import load_e2e_context
-from infrastructure.stages.frontend.triggers.implementation import run_trigger_tdd, verify_frontend
+from infrastructure.stages.frontend.triggers.implementation import check_frontend_baseline, prepare_trigger_runtime, verify_frontend
 from infrastructure.stages.frontend.triggers.acceptance import run_independent_acceptance
 from infrastructure.shared.models.text import TextModel
 from infrastructure.utils.presentation.console import DemoConsole
@@ -26,13 +26,15 @@ def implement_frontend_triggers(input_dir: Path, arc_dir: Path, pause: bool = Fa
             report.update({"status": "NO_UI", "summary": {"requirements": 0, "triggers": 0, "e2e_tests": 0, "ui_tests": 0, "failed": 0}})
             save_json(arc_dir / "frontend_e2e.json", report)
             return report
-        model = TextModel()
-        result = run_trigger_tdd(arc_dir, tree, schema, backend, ui, interactions, images,
-            contexts, model, DemoConsole(pause), report, max_turns, max_tests)
+        model, console = TextModel(), DemoConsole(pause)
+        _, checks = prepare_trigger_runtime(arc_dir, backend, ui, interactions, console, max_tests)
+        check_frontend_baseline(arc_dir, ui, checks, model, console, report, max_turns)
         acceptance = run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, interactions,
-            model, DemoConsole(pause), max_turns, process_report=result)
-        if any(entry.get("repair_checks") for entry in acceptance["requirements"].values()):
-            result = verify_frontend(arc_dir, tree, backend, ui, DemoConsole(pause), result)
+            model, console, max_turns, process_report=report, primary=True, max_tests=max_tests)
+        report["requirements"].update(acceptance["requirements"])
+        suites = [entry["test_path"] for entry in acceptance["requirements"].values()
+            if (arc_dir.parent / entry["test_path"]).is_file()]
+        result = verify_frontend(arc_dir, tree, backend, ui, console, report, suites=suites)
         result["verification"]["independent_acceptance"] = {"status": "GREEN" if acceptance["status"] == "GREEN" else "FAILED",
             "report": ".arc/independent_acceptance.json"}
         if acceptance["status"] != "GREEN":
