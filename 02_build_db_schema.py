@@ -11,7 +11,8 @@ from infrastructure.utils.presentation.formatting import format_changes, format_
 from infrastructure.utils.presentation.logging import console_log
 from infrastructure.shared.rag.schema import SchemaRetriever
 from infrastructure.stages.requirements.tree import RequirementTree
-from infrastructure.stages.database.schema import apply_patch, check_related_fields
+from infrastructure.stages.database.schema import apply_patch, check_related_fields, validate_schema
+from infrastructure.utils.paths import FILE_STEM_RULE, validate_file_stems
 from infrastructure.utils.files import save_json
 from infrastructure.shared.agent.proposals import propose_json
 from infrastructure.shared.agent.tasks import TaskFailures
@@ -38,15 +39,15 @@ For this requirement, follow this order:
    only READS. Given state such as an existing account or session still needs schema
    definitions, even if account/session creation belongs to a later requirement.
 2. Reuse existing entities/fields from symbol_inventory. For any needed entity or
-   field that is absent, DEFINE it in this response's entities update, including its
+   field that is absent, DEFINE it in the complete proposal's entities update, including its
    required field properties. Do not merely mention it or leave a placeholder.
 3. List related_fields using only fields that will exist AFTER this update is merged:
-   existing inventory fields plus fields defined in this response. Do not rely on
+   existing inventory fields plus fields defined in the complete proposal. Do not rely on
    a future requirement to define a field referenced by the current requirement.
 
 For example, if a requirement reads Session.id and Session.account_id but Session is
 absent from symbol_inventory, entities must define Session with both fields in this
-same response before related_fields can contain those names. If the existing entity
+complete proposal before related_fields can contain those names. If the existing entity
 is AccountSession, reuse AccountSession's exact field names instead of citing Session.
 Listing a field in related_fields does not create that entity or field.
 
@@ -54,17 +55,19 @@ Store persistent business data, not transient UI values such as password confirm
 Derive constraints from requirement evidence; example fixture values alone do not
 establish uniqueness, normalization, value ranges or defaults.
 
-Return {"entities": {...}, "related_fields": ["Entity.field"]}.
+A complete proposal has {"entities": {...}, "related_fields": ["Entity.field"]}.
 entities is an incremental update keyed by entity name. Each new entity contains
-"description" (string) and "fields" (object keyed by field name).
+"description" (string) and "fields" (nonempty object keyed by field name).
 Each new field contains these separate properties:
 - description: string.
 - type: string, integer, number, boolean, date, datetime, uuid or json.
 - nullable, primary_key, unique: boolean properties.
 - references: null or a qualified "Entity.field" string.
 - constraints: array of descriptions of required value/domain constraints.
-Use SQL-compatible entity/field identifiers. Represent keys and relationships needed
-by the requirements, with compatible referenced field types. Password storage holds
+Use SQL-compatible entity/field identifiers without dots (reserved for Entity.field);
+do not distinguish fields only by case. Foreign-key targets must exist after the
+proposal is merged, including any targets defined in this proposal.
+Represent keys and relationships with compatible referenced field types. Password storage holds
 hashes rather than plaintext. Do not invent unrelated business features.
 
 For existing entities/fields, return only changed properties; omitted properties
@@ -134,13 +137,16 @@ def build_db_schema(arc_dir: Path, pause: bool = False, top_k: int = 6, max_atte
             }
             def accept(patch):
                 updated = apply_patch(schema, patch)
+                validate_file_stems(updated["entities"], "entity name")
+                validate_schema(updated)
                 check_related_fields(updated, patch["related_fields"])
                 updated["requirements"][requirement["id"]] = sorted(set(patch["related_fields"]))
                 changes = format_changes(schema, updated)
                 return updated, changes
 
-            (updated, changes), patch = propose_json(model, INSTRUCTIONS, request, accept,
-                console, f"Schema design {requirement['id']}", max_attempts, context_index=ContextIndex(lambda: {"schema": schema["entities"]}))
+            (updated, changes), patch = propose_json(model, INSTRUCTIONS + "\nEntity names: " + FILE_STEM_RULE, request, accept,
+                console, f"Schema design {requirement['id']}", max_attempts,
+                context_index=ContextIndex(lambda: {"schema": schema["entities"]}), repair_fields=("related_fields",))
             # --- Pass boundary: publish the schema ----------------------
             # Subsequent requirements retrieve from this updated graph.
             save_json(arc_dir / "db_schema.json", updated)

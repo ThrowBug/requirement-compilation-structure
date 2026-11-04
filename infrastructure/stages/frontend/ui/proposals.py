@@ -20,7 +20,7 @@ EXAMPLE = {
 REUSE_EXAMPLE = {"elements": {}, "pages": {}, "requirement_ui": ["UI-search"],
     "step_ui": {"STEP-reuse": ["UI-search"]}}
 INSTRUCTIONS = (
-    "COMPLETE UI DECLARATION EXAMPLE:\n" + json.dumps(EXAMPLE, ensure_ascii=False, indent=2)
-    + "\nREUSE WITHOUT CHANGES:\n" + json.dumps(REUSE_EXAMPLE, indent=2)
+    "COMPLETE UI DECLARATION EXAMPLE:\n" + json.dumps(EXAMPLE, ensure_ascii=False, separators=(",", ":"))
+    + "\nREUSE WITHOUT CHANGES:\n" + json.dumps(REUSE_EXAMPLE, separators=(",", ":"))
     + "\nReturn all four sections. Variables belong in element.data; do not add runtime values."
 )

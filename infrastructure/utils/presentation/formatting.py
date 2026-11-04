@@ -56,8 +56,8 @@ def format_changes(before: dict, after: dict) -> str:
             else:
                 lines.append(f"  UPDATED FIELD: {name}.{field_name}")
                 for key, value in field.items():
-                    if previous[key] != value:
-                        lines.append(f"    {key}: {previous[key]!r} -> {value!r}")
+                    if key not in previous or previous[key] != value:
+                        lines.append(f"    {key}: {previous.get(key)!r} -> {value!r}")
     return "\n".join(lines) or "No changes: the existing schema is reused."
 
 

@@ -22,7 +22,7 @@ class FileToolError(ValueError):
             self.feedback["path"] = path
 
 
-def workspace_path(root, path):
+def workspace_path(root, path, *, allow_directory=False):
     """Translate a portable model path into a native path inside the project."""
     parts = relative_path(path).parts
     if any(part.startswith(".") or part in EXCLUDED for part in parts) or parts[:2] == ("backend", "data"):
@@ -33,19 +33,36 @@ def workspace_path(root, path):
         current = current / part
         if current.is_symlink():
             raise FileToolError("INVALID_PATH", "Symlinks are not allowed", path)
-    if not current.resolve().is_relative_to(root.resolve()) or current.is_dir():
+    if not current.resolve().is_relative_to(root.resolve()) or (current.is_dir() and not allow_directory):
         raise FileToolError("INVALID_PATH", "Use a file inside the working directory", path)
     return current
 
 
 def read_file(files, path, start_line=1, end_line=None):
     """Read the requested lines only; reading never expands the pinned source context."""
-    target = files.path(path)
+    target = workspace_path(files.output, path, allow_directory=True)
     if files.readable is not None and path not in files.readable:
         raise FileToolError("READ_NOT_ALLOWED", "This task cannot read this file; use allowed_read_paths", path,
             allowed_read_paths=sorted(files.readable))
     if not target.is_file():
-        raise FileToolError("FILE_NOT_FOUND", "File does not exist; use edit_file/create for a new file", path)
+        directory = path if target.is_dir() else path.rpartition("/")[0]
+        candidates = []
+        for name in sorted(files.files):
+            if (directory and not name.startswith(directory + "/")) or (
+                    files.readable is not None and name not in files.readable):
+                continue
+            try:
+                if files.path(name).is_file():
+                    candidates.append(name)
+            except (ValueError, OSError):
+                continue
+            if len(candidates) == 6:
+                break
+        if target.is_dir():
+            raise FileToolError("EXPECTED_FILE", "read_file takes a concrete file path, not a directory. "
+                "Use a supplied file or discover a specific candidate.", path, candidate_paths=candidates)
+        raise FileToolError("FILE_NOT_FOUND", "File does not exist; use an existing supplied path, "
+            "or edit_file/create if this task needs a new file", path, candidate_paths=candidates)
     if type(start_line) is not int or start_line < 1 or (end_line is not None and
             (type(end_line) is not int or end_line < start_line)):
         raise FileToolError("INVALID_LINE_RANGE", "Use positive, inclusive line numbers", path)
@@ -117,7 +134,8 @@ def edit_file(files, path, operation, new_content, old_content=""):
                 raise FileToolError("WHOLE_FILE_REPLACEMENT_NOT_ALLOWED",
                     "Incremental compilation forbids replacing a whole existing file over "
                     f"{SMALL_FILE_REPLACEMENT_LIMIT} characters. "
-                    "Use a smaller unique span and preserve earlier requirements, registrations and state.", path)
+                    "Use one or more smaller unique spans, or append a new helper. Preserve earlier "
+                    "requirements, registrations and state. Copy old_content from the current file.", path)
             first = current.find(old_content)
             count = 0 if first < 0 else (2 if current.find(old_content, first + 1) >= 0 else 1)
             if count != 1:

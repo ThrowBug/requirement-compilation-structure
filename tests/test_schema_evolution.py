@@ -95,6 +95,28 @@ class SchemaEvolution(unittest.TestCase):
             self.assertEqual(failure.exception.failures[0]['task'], 'REQ-1')
             model.generate_json.assert_not_called()
 
+    def test_invalid_foreign_key_is_repaired_before_sql_planning(self):
+        from infrastructure.stages.database.order import implementation_groups
+        stage = import_module('02_build_db_schema')
+        with TemporaryDirectory() as directory:
+            arc = Path(directory)
+            save_json(arc / 'requirements.json', {'id': 'ROOT', 'children': [{'id': 'REQ', 'name': 'Folders'}]})
+            base = {'Folder': {'description': 'Folders', 'fields': {
+                'id': field('ID'), 'parent': field('Parent folder')}}}
+            references = [True, 'Folder.missing', 'Folder.id']
+            def propose(_, request):
+                if len(references) != 3:
+                    self.assertEqual(json.loads((arc / 'db_schema.json').read_text())['entities'], {})
+                    self.assertIn('Field Folder.parent references', request['correction']['error'])
+                entities = deepcopy(base)
+                entities['Folder']['fields']['parent']['references'] = references.pop(0)
+                return {'entities': entities, 'related_fields': ['Folder.parent']}
+            with patch.object(stage, 'TextModel', return_value=Mock(generate_json=propose)), \
+                    patch.object(stage, 'DemoConsole', return_value=Mock()):
+                result = stage.build_db_schema(arc, max_attempts=3)
+            self.assertEqual(references, [])
+            self.assertEqual(implementation_groups(result), [['Folder']])
+
 
 if __name__ == '__main__':
     unittest.main()

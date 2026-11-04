@@ -26,18 +26,20 @@ class ImageCompression(unittest.TestCase):
         model = VisualModel.__new__(VisualModel)
         model.name, model.client = 'test-model', object()
         replies = [SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
-            for content in ('{broken', '{"layout":"test","elements":[],"style":"test"}')]
+            for content in ('{broken', '{"layout":"test"}', '{"layout":"test","elements":[],"style":"test"}')]
         with TemporaryDirectory() as temporary:
             path = Path(temporary) / 'reference.png'
             path.write_bytes(encode(Image.new('RGB', (16, 8), 'white')))
             with patch('infrastructure.shared.models.vision.invoke', side_effect=replies) as invoke, redirect_stdout(StringIO()):
                 result = model.analyze(path)
         self.assertEqual(result['layout'], 'test')
-        self.assertEqual(invoke.call_count, 2)
-        first, second = [call.args[1]['messages'][0]['content'] for call in invoke.call_args_list]
+        self.assertEqual(invoke.call_count, 3)
+        first, second, third = [call.args[1]['messages'][0]['content'] for call in invoke.call_args_list]
         self.assertEqual(first[1], second[1])
         self.assertIn('JSONDecodeError', second[0]['text'])
         self.assertIn('{broken', second[0]['text'])
+        self.assertEqual(first[1], third[1])
+        self.assertIn('missing required fields: elements, style', third[0]['text'])
 
     def test_large_transparent_image_is_resized_with_correct_aspect_and_white_background(self):
         original = encode(Image.new('RGBA', (3000, 1500), (255, 0, 0, 0)))

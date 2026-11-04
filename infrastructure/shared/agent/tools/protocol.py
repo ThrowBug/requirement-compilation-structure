@@ -1,6 +1,6 @@
 """Shared model instructions for the executable file-tool registry."""
 
-FILE_TOOL_RULES = '''Use the file tools declared in input.tools. Return one JSON object with tool_calls.
+FILE_TOOL_RULES = '''For a file response, use only the tools declared in input.tools.
 Each call is FLAT: tool, path and all other parameters are sibling fields.
 Do not nest parameters inside arguments, parameters or function.
 These are JSON records consumed by this compiler, not provider-native tool invocations.
@@ -46,9 +46,9 @@ INCREMENTAL COMPILATION IS MANDATORY
 Each task extends the application already compiled for earlier requirements. The current
 requirement and supplied excerpts are a partial view, never a replacement specification
 for the entire application. Earlier behavior remains required even when omitted here.
-Read the relevant existing code and make local additions or corrections. Never rewrite
-an existing file from scratch, replace its full contents, empty a shared function and
-rebuild it for only this requirement, or delete earlier code to make room for new code.
+Read the relevant existing code and make local additions or corrections. Use whole-file
+replacement only under the small-file exception below. Do not empty a shared function
+and rebuild it for only this requirement, or delete earlier code to make room for new code.
 Preserve earlier imports, exports, functions, routes, request cases, state keys, seed
 records and test coverage. Extend existing shared functions/maps instead of replacing
 them with a collection containing only the newest requirement. Corrections may change
@@ -68,9 +68,9 @@ For create/prepend/append, omit old_content or use an empty string. Include need
 A fragment read is sufficient for a unique replacement; no full-file read is required.
 Never overwrite existing files through create or guess old_content. Preserve unrelated code.
 
-Task.file_target describes the primary output directory/path and expected ownership.
-Create or bind that target before new helpers. Choose a meaningful path inside its directory
-when path is null. Use an existing path when supplied. Required test/SQL destinations may
+When task.file_target is supplied, it describes the primary output and its ownership.
+Create or bind a pending target before new helpers. Choose a meaningful path inside its
+directory when path is null. Use the specified path when it is set. Required test/SQL destinations may
 be adapted by the compiler; tool results report the actual path. Use that actual path in
 later calls and relative imports; do not keep retrying the originally requested location.
 New helper files may be created in this task's writable application directories.
@@ -88,7 +88,7 @@ matches, paths and destinations; inspect only needed evidence and retry.
 Earlier compilation/test failures remain unresolved until checks run again. A tool-call
 format error does not prove the application correct or replace the last check result.
 
-When feedback is present, add diagnosis before choosing changes:
+When feedback is present, include diagnosis in the edit or no-edit acceptance response:
 {"diagnosis":{"cause":"implementation","reason":"Evidence and proposed repair"},"tool_calls":[...]}.
 Use cause=test_requirement_mismatch, test_overconstraint, environment or implementation.
 Read original requirement evidence before correcting generated tests. Preserve required

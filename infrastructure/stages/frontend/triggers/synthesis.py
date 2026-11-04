@@ -10,8 +10,9 @@ from infrastructure.stages.database.obligations.records import normalize_obligat
 from infrastructure.shared.agent.proposals import propose_json
 from infrastructure.shared.agent.tasks import TaskFailures
 from infrastructure.shared.agent.discovery import ContextIndex
+from infrastructure.utils.paths import FILE_STEM_RULE, validate_file_stems
 from infrastructure.shared.agent.conventions import load_conventions, select_conventions
-from infrastructure.stages.backend.primitives import validate_design, ObligationCoverageError
+from infrastructure.stages.backend.primitives import validate_design, ObligationCoverageError, explain_accepted_regression
 
 
 def synthesize_triggers(arc_dir, ui, tree, backend, contexts, model, console, max_attempts=10):
@@ -50,13 +51,19 @@ def synthesize_triggers(arc_dir, ui, tree, backend, contexts, model, console, ma
                 for sid in tree.own_steps[rid]:
                     proposal["step_triggers"][sid]
                 updated = apply_decomposition(result, proposal, rid)
-                validate_coverage(updated, backend, obligations, tree, [*accepted, rid])
+                validate_file_stems(updated["triggers"], "trigger ID")
+                try:
+                    validate_coverage(updated, backend, obligations, tree, [*accepted, rid])
+                except ObligationCoverageError as error:
+                    explain_accepted_regression(error, result, updated, rid, "triggers",
+                        lambda trigger: trigger_obligations(trigger, backend), tree)
+                    raise
                 derived = {tid: trigger_obligations(updated["triggers"][tid], backend)
                     for tid in updated["requirements"][rid]}
                 console.show(label + " | Derived DB effects", json.dumps(derived, ensure_ascii=False, indent=2))
                 return updated
 
-            result, _ = propose_json(model, INSTRUCTIONS, request, accept, console, label, max_attempts, context_index=ContextIndex(lambda: {"convention": conventions, "api": backend["apis"], "page": ui["pages"], "ui_element": ui["elements"], "ui_data": data_symbols(ui["elements"]), "trigger": result["triggers"]}))
+            result, _ = propose_json(model, INSTRUCTIONS + "\nTrigger IDs: " + FILE_STEM_RULE, request, accept, console, label, max_attempts, context_index=ContextIndex(lambda: {"convention": conventions, "api": backend["apis"], "page": ui["pages"], "ui_element": ui["elements"], "ui_data": data_symbols(ui["elements"]), "trigger": result["triggers"]}))
             accepted.append(rid)
             console.artifact("frontend_triggers", result, label)
             save_json(arc_dir / "frontend_triggers.json", result)

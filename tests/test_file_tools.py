@@ -24,6 +24,43 @@ class FileToolTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
 
+    def test_directory_and_missing_file_reads_suggest_only_pinned_existing_files(self):
+        support, hidden = 'backend/tests/support.ts', 'backend/tests/hidden.ts'
+        for path in (support, hidden):
+            save_text(self.root / path, 'source')
+        tools = FileTools(self.root, references=[support, 'backend/tests/uncreated.ts'])
+        for path, code in [('backend/tests', 'EXPECTED_FILE'), ('backend/tests/missing.ts', 'FILE_NOT_FOUND')]:
+            with self.assertRaises(FileToolError) as caught:
+                tools.execute([call('read_file', path=path)])
+            self.assertEqual(caught.exception.feedback['code'], code)
+            self.assertEqual(caught.exception.feedback['candidate_paths'], [support])
+        restricted = FileTools(self.root, references=[support, hidden], readable=[support])
+        with self.assertRaises(FileToolError) as caught:
+            restricted.execute([call('read_file', path='backend/tests')])
+        self.assertEqual(caught.exception.feedback['allowed_read_paths'], [support])
+        self.assertNotIn(hidden, str(caught.exception.feedback))
+
+    def test_rejected_whole_file_rewrite_is_not_echoed_into_local_edit_retry(self):
+        path = 'backend/src/api/register.ts'
+        before = 'export const marker = "old";\n' + '// preserve existing registration\n' * 8
+        save_text(self.root / path, before)
+        requests = []
+        def generate(_, payload):
+            requests.append(payload)
+            if len(requests) == 1:
+                return {'tool_calls': [call('edit_file', path=path, operation='replace',
+                    old_content=before, new_content='rejected whole replacement')]}
+            feedback = payload['feedback'][0]
+            self.assertEqual(feedback['details']['code'], 'WHOLE_FILE_REPLACEMENT_NOT_ALLOWED')
+            self.assertEqual(feedback['previous_response']['tool_calls'], [call('edit_file', path=path, operation='replace')])
+            self.assertEqual(payload['files'][path]['content'], before)
+            return {'tool_calls': [call('edit_file', path=path, operation='replace',
+                old_content='"old"', new_content='"new"')]}
+        gate = Mock(return_value={})
+        run_file_agent(Mock(generate_json=generate), '', {}, FileTools(self.root, [path]), gate, 2, Mock(), 'repair')
+        gate.assert_called_once()
+        self.assertEqual((self.root / path).read_text(), before.replace('"old"', '"new"'))
+
     def test_operations_run_sequentially_and_preserve_unrelated_content(self):
         path = "backend/src/example.ts"
         tools = SourceFiles(self.root, root="backend/src", tests_root="backend/tests").workspace()

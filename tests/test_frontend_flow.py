@@ -181,6 +181,8 @@ class FrontendFlow(unittest.TestCase):
             nonlocal repaired
             task = payload["task"]
             if "implementation_paths" in task and "file_target" not in task:
+                self.assertIn("every listed path is a required", instructions)
+                self.assertIn("wire them into the real interaction", instructions)
                 implementation_calls.append(deepcopy(payload))
                 rid = task["requirement"]["id"]
                 implementation_counts[rid] = implementation_counts.get(rid, 0) + 1
@@ -430,9 +432,10 @@ class FrontendFlow(unittest.TestCase):
         result = synthesize_ui(self.arc, self.tree, {}, contexts, Mock(generate_json=generate), Mock())
         self.assertEqual(len(requests), 3)
         self.assertNotIn("step_obligations", requests[0])
+        self.assertTrue(all("all_pages" not in request for request in requests))
+        self.assertEqual(requests[1]["retrieved_pages"]["editor"], page_context(self.ui, "editor"))
 
     def test_incomplete_ui_response_gets_all_missing_sections_in_one_repair(self):
-        from infrastructure.shared.agent.tasks import StageIncomplete
         requests = []
         def generate(instructions, payload):
             requests.append(deepcopy(payload))
@@ -443,14 +446,13 @@ class FrontendFlow(unittest.TestCase):
                 return {"pages": {pid: self.ui["pages"][pid]}}
             if len(requests) == 2:
                 details = payload["correction"]["details"]
-                self.assertIn("Actual failure: Cannot read UI/data response", instructions)
-                self.assertIn('"missing_sections"', instructions)
-                self.assertIn("FINAL JSON", instructions)
+                self.assertIn("Cannot read UI/data response", payload["correction"]["error"])
+                self.assertIn("complete replacement JSON object", instructions)
                 self.assertEqual(set(details["missing_sections"]),
-                    {"elements", "bindings", "requirement_ui", "step_ui"})
+                    {"elements", "requirement_ui", "step_ui"})
                 self.assertEqual(set(details["response_template"]),
-                    {"pages", "elements", "bindings", "requirement_ui", "step_ui"})
-                self.assertEqual(payload["all_pages"], {})
+                    {"pages", "elements", "requirement_ui", "step_ui"})
+                self.assertEqual(payload["retrieved_pages"], {})
                 self.assertEqual(json.loads((self.arc / "ui_design.json").read_text())["pages"], {})
             return {"pages": {pid: self.ui["pages"][pid]} if rid != "REQ-B" else {},
                 "elements": context["elements"] if rid != "REQ-B" else {},
@@ -460,8 +462,8 @@ class FrontendFlow(unittest.TestCase):
         contexts = {rid: {**record, "images": {},
             "steps": [self.tree.steps[sid] for sid in self.tree.own_steps[rid]]}
             for rid, record in self.tree.requirements.items()}
-        with self.assertRaises(StageIncomplete):
-            synthesize_ui(self.arc, self.tree, {}, contexts, Mock(generate_json=generate), Mock())
+        result = synthesize_ui(self.arc, self.tree, {}, contexts, Mock(generate_json=generate), Mock())
+        self.assertIn("editor", result["pages"])
         self.assertEqual(len(requests), 4)
 
     def test_complete_ui_prompt_example_produces_page_context_and_display_tests(self):
@@ -518,15 +520,46 @@ class FrontendFlow(unittest.TestCase):
                 raise json.JSONDecodeError("Invalid JSON", "{broken", 1)
             rid = payload["requirement"]["id"]
             ids = self.interactions["requirements"][rid]
+            if len(calls) == 2:
+                return {"triggers": {"TR:save": self.interactions["triggers"][ids[0]]},
+                    "requirement_triggers": ["TR:save"], "step_triggers": {
+                        sid: ["TR:save"] for sid in self.tree.own_steps[rid]}}
+            if len(calls) == 3:
+                self.assertIn("Invalid trigger ID 'TR:save'", payload["correction"]["error"])
+                self.assertFalse(json.loads((self.arc / "frontend_triggers.json").read_text())["triggers"])
             return {"triggers": {tid: self.interactions["triggers"][tid] for tid in ids},
                 "requirement_triggers": ids, "step_triggers": {sid: ids for sid in self.tree.own_steps[rid]}}
 
         synthesize_triggers(self.arc, self.ui, self.tree, self.backend,
             self.tree.requirements, Mock(generate_json=generate), Mock())
-        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(calls), 5)
         self.assertIn("correction", calls[1])
         self.assertTrue(all("required_obligations" in call for call in calls))
         self.assertTrue((self.arc / "frontend_triggers.json").is_file())
+
+    def test_trigger_repair_locates_the_changed_trigger_of_an_accepted_requirement(self):
+        from infrastructure.stages.frontend.triggers.synthesis import synthesize_triggers
+        self.obligations['steps'] = {sid: self.obligations['requirements'][rid]
+            for rid in self.tree.leaves for sid in self.tree.own_steps[rid]}
+        save_json(self.arc / 'db_obligations.json', self.obligations)
+        retries = []
+        def generate(_, payload):
+            rid = payload['requirement']['id']
+            ids = self.interactions['requirements'][rid]
+            definitions = {tid: deepcopy(self.interactions['triggers'][tid]) for tid in ids}
+            if rid == 'REQ-B':
+                if 'correction' not in payload:
+                    definitions['TR-SAVE']['action'] = [{'kind': 'api', 'api': 'API-COUNT'}]
+                else:
+                    retries.append(payload['correction']['details']['accepted_regression'])
+            return {'triggers': definitions, 'requirement_triggers': ids,
+                'step_triggers': {sid: ids for sid in self.tree.own_steps[rid]}}
+        result = synthesize_triggers(self.arc, self.ui, self.tree, self.backend, self.tree.requirements,
+            Mock(generate_json=generate), Mock(), max_attempts=2)
+        self.assertEqual(len(retries), 1)
+        self.assertEqual(retries[0]['affected_requirement'], 'REQ-A')
+        self.assertEqual(retries[0]['changed_effects']['TR-SAVE']['removed']['write'], ['Note.id', 'Note.text'])
+        self.assertEqual(result['triggers']['TR-SAVE'], self.interactions['triggers']['TR-SAVE'])
 
 
     def test_navigation_context_includes_later_page_mount_and_keeps_ownership(self):

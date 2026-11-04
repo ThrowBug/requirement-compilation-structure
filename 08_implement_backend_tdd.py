@@ -58,6 +58,9 @@ fixture arguments or password encodings. Initialization loads db/seeds/ENTITY.sq
 existing prerequisites instead of assuming empty tables or duplicating identities. Arrange
 scenario-specific absence/conflicting states in this isolated database. Do not invoke
 another requirement's registration/creation API to manufacture Given data.
+Read concrete existing files only. The support module and supplied SQL are already in
+input.files. Do not read the backend/tests directory or guess a missing test file;
+use the supplied paths or discover a specific file candidate first.
 
 Within max_tests cover meaningful success and critical requirement-defined rejection.
 Assert relevant persisted results/forbidden writes with SQL where needed; HTTP is the

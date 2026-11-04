@@ -3,11 +3,38 @@ import unittest
 from copy import deepcopy
 from infrastructure.stages.database.obligations.records import normalize_inference, check_symbols
 from infrastructure.stages.frontend.triggers.design import validate_coverage
-from infrastructure.stages.backend.primitives import ObligationCoverageError
+from infrastructure.stages.backend.primitives import ObligationCoverageError, apply_decomposition
+from infrastructure.shared.agent.proposals import response_feedback
 from test_frontend_flow import frontend_fixture
 
 
 class ObligationIntegrity(unittest.TestCase):
+    def test_api_repair_names_only_changed_prior_dependencies_and_preserves_design(self):
+        def effects(*writes):
+            return {'read': [], 'write': list(writes)}
+        before = {'apis': {'API-old': effects('Account.id'), 'API-unrelated': effects('Other.id')},
+            'requirements': {'REQ-1': ['API-old']}}
+        original = deepcopy(before)
+        obligations = {'requirements': {'REQ-1': effects('Account.id'),
+            'REQ-2': effects('Account.id', 'Account.email')}}
+        rejected = {'apis': {'API-old': effects('Account.id', 'Account.email'),
+            'API-unrelated': effects('Other.name')}, 'requirement_apis': ['API-old']}
+        with self.assertRaises(ObligationCoverageError) as caught:
+            apply_decomposition(before, rejected, 'REQ-2', obligations)
+        feedback = response_feedback(caught.exception, rejected)
+        self.assertNotIn('Account.email', feedback['error'])
+        details = feedback['details']
+        self.assertEqual(details['excess']['write'], ['Account.email'])
+        regression = details['accepted_regression']
+        self.assertEqual(regression['affected_requirement'], 'REQ-1')
+        self.assertEqual(regression['proposed_for'], 'REQ-2')
+        self.assertEqual(regression['changed_effects'], {'API-old': {
+            'added': effects('Account.email'), 'removed': effects()}})
+        self.assertEqual(before, original)
+        fixed = apply_decomposition(before, {'apis': {'API-new': effects('Account.id', 'Account.email')},
+            'requirement_apis': ['API-new']}, 'REQ-2', obligations)
+        self.assertEqual(fixed['apis']['API-old'], original['apis']['API-old'])
+
     def test_omitted_step_or_mode_differs_from_explicit_empty(self):
         value = {'requirement': {'read': [], 'write': []}, 'steps': {}}
         with self.assertRaises(KeyError):

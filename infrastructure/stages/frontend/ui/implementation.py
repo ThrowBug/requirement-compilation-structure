@@ -56,7 +56,7 @@ aria-labelledby. Use exact placeholders only when the requirement specifies plac
 an accessible field name alone does not prescribe a placeholder or HTML implementation.
 Apply this to buttons, links, headings and named regions as well as form fields. If the
 generated design or reference image conflicts with an explicit original UI contract, follow
-the original requirement and explain the discrepancy. Unspecified wording is an implementation
+the original requirement and explain the discrepancy in diagnosis.reason. Unspecified wording is an implementation
 choice; business object names still come from actual data, not reference examples.
 This stage builds presentation, native editing and navigation, not business API operations,
 session restoration or later requirements' workflows. Step 12 adds those interactions.

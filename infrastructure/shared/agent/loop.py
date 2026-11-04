@@ -2,7 +2,7 @@
 
 import json
 
-from infrastructure.shared.agent.discovery import DISCOVERY_RULES, DiscoverySession, DiscoveryStalled
+from infrastructure.shared.agent.discovery import DISCOVERY_RULES, DiscoverySession, DiscoveryStalled, context_query
 from infrastructure.shared.agent.conventions import task_conventions
 
 from infrastructure.shared.agent.tools import FileTools
@@ -82,19 +82,20 @@ def run_file_agent(model, instructions: str, task: dict, files: FileTools, gate,
                     request["task"]["shared_conventions"] = conventions
                 if context_result is not None:
                     request["context_result"] = context_result
-                rules = instructions + "\n\n" + FILE_TOOL_RULES
+                modes = "Return one JSON object: tool_calls containing only reads, or tool_calls for edits/bindings (empty to run acceptance)."
+                if allow_discovery:
+                    modes += " Alternatively, for semantic discovery return only context_request; never combine it with tool_calls."
+                else:
+                    modes += " Semantic discovery is disabled."
+                rules = modes + "\n\n" + instructions + "\n\n" + FILE_TOOL_RULES
                 if allow_discovery:
                     rules += "\n\n" + DISCOVERY_RULES
-                else:
-                    rules += "\nSemantic discovery is disabled for this task. Use supplied evidence and read_file only."
                 return call_model(model, rules, request, broker=broker,
                     call_type="file_repair" if feedback else "file")
             response = request_model()
             while isinstance(response, dict):
                 if "context_request" in response:
-                    if not allow_discovery:
-                        raise ValueError("Semantic discovery is disabled for this task; use the supplied task evidence and read_file within its allowed scope")
-                    query = response["context_request"]
+                    query = context_query(response, enabled=allow_discovery)
                     console.show(label + " | Context query", json.dumps(query, ensure_ascii=False))
                     try:
                         if isinstance(query, dict) and query.get("kind") == "file" and "ids" in query:

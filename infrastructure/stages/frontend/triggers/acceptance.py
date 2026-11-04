@@ -66,7 +66,7 @@ This is a separate test review, not implementation repair. Actual failure eviden
 provided. Diagnose test_requirement_mismatch, test_overconstraint, environment, or
 implementation. Change ONLY test_path if specific original requirement or fixture evidence
 shows the test is wrong. Preserve every required business outcome. If the implementation
-or environment is wrong, return tool_calls=[] and explain it; the failed acceptance remains
+or environment is wrong, return tool_calls=[] and explain it in diagnosis.reason; the failed acceptance remains
 failed. Compilation passing is enough to finish this review; you are NOT asked to turn a
 business failure GREEN. Never adjust expected values just to match observed wrong behavior.
 Use original requirements as authority; no application source or process tests are available.'''

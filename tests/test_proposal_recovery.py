@@ -4,10 +4,24 @@ from copy import deepcopy
 import unittest
 from unittest.mock import Mock
 
+from infrastructure.shared.agent.loop import AgentExhausted
 from infrastructure.shared.agent.proposals import propose_json
 
 
 class ProposalRecovery(unittest.TestCase):
+    def test_list_feedback_from_nested_failure_reaches_next_attempt(self):
+        details = [{"error": "original failure"}]
+        failure = AgentExhausted("Nested task", 1, details)
+        model = Mock(generate_json=Mock(side_effect=[failure, {"ok": True}]))
+
+        result, _ = propose_json(model, "Design", {}, lambda value: value["ok"], Mock(), "Outer task", 2)
+
+        self.assertTrue(result)
+        self.assertEqual(model.generate_json.call_count, 2)
+        correction = model.generate_json.call_args.args[1]["correction"]
+        self.assertEqual(correction["error"], str(failure))
+        self.assertEqual(correction["details"], details)
+
     def test_missing_keys_types_and_empty_records_can_repair_beyond_three_proposals(self):
         proposals = [{"read/write": {"read": []}}, {"read": None}, [], {"read": []},
             {"read": [7]}, {"read": ["note"]}]

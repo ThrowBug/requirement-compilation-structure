@@ -46,7 +46,7 @@ current scenario step ID to element IDs, using [] when no UI is needed.
 
 UPDATES AND REUSE
 Return complete records for new or changed elements/pages, preserving unrelated behavior.
-Unchanged records may be omitted from their maps; include all four root keys even when empty.
+Omit unchanged records from elements/pages; reuse their IDs in associations. Include all four root keys even when empty.
 Reuse canonical variable names and element IDs. Query relevant elements/pages when needed.
 mode declares how the user interacts with the element; implementation chooses framework
 bindings and routing. No fixed host synchronizes inputs or interprets this design. Additional

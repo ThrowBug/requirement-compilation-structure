@@ -18,14 +18,30 @@ from infrastructure.shared.models.text import DEFAULT_MODEL, JSON_OUTPUT_RULE, r
 
 VISION_INSTRUCTIONS = """Describe the supplied UI reference using visible evidence only.
 Return {"layout":"...", "elements":["..."], "style":"..."}.
-layout describes regions, alignment and relative positions; elements lists visible
-controls, labels, options and states; style describes colors, typography and spacing.
+layout and style are strings. layout describes regions, alignment and relative positions;
+style describes colors, typography and spacing. elements is an array of strings describing
+visible controls, labels, options and states.
 Write descriptions in English while quoting visible labels in their original language.
 Identify illegible or uncertain details instead of inventing them. Do not infer hidden
 business behavior, APIs, database fields or interactions from appearance alone.
 """
 
 VISUAL_REPAIR_PREFIX = "Correct the previous response:\n"
+
+
+def accept_visual_analysis(value):
+    """Require the evidence fields advertised in VISION_INSTRUCTIONS."""
+    if not isinstance(value, dict):
+        raise ValueError("Visual analysis must be an object with layout, elements and style")
+    missing = [key for key in ("layout", "elements", "style") if key not in value]
+    if missing:
+        raise ValueError("Visual analysis is missing required fields: " + ", ".join(missing))
+    if not isinstance(value["layout"], str) or not isinstance(value["style"], str):
+        raise ValueError("Visual analysis layout and style must be strings")
+    if not isinstance(value["elements"], list) or any(not isinstance(item, str) for item in value["elements"]):
+        raise ValueError("Visual analysis elements must be an array of strings")
+    return value
+
 
 def compress_image(data: bytes, mime: str) -> tuple[bytes, str]:
     """Resize static references to 2048px and encode JPEG, retaining smaller originals."""
@@ -73,14 +89,14 @@ class VisualModel:
         print(f"Image compression: {image.name} | {len(original) / 1024:.1f} -> {len(compressed) / 1024:.1f} KiB", flush=True)
         encoded = base64.b64encode(compressed).decode("ascii")
         result, _ = propose_json(self, VISION_INSTRUCTIONS, {"image_url": f"data:{mime};base64,{encoded}"},
-            lambda value: value, DemoConsole(), f"Visual analysis {image.name}", max_attempts)
+            accept_visual_analysis, DemoConsole(), f"Visual analysis {image.name}", max_attempts)
         return result
 
     def generate_json(self, instructions: str, payload: dict) -> dict:
         """Request visual JSON and include prior response errors when repairing it."""
         text = instructions.rstrip() + "\n" + JSON_OUTPUT_RULE
         if "correction" in payload:
-            text += "\n" + VISUAL_REPAIR_PREFIX + json.dumps(payload["correction"], ensure_ascii=False)
+            text += "\n" + VISUAL_REPAIR_PREFIX + json.dumps({"correction": payload["correction"]}, ensure_ascii=False)
         mode = getattr(self, "reasoning", "low")
         arguments = {
                 "model": self.name,

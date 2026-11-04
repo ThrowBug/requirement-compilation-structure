@@ -43,6 +43,15 @@ produce the stage output using the available evidence. Query errors are feedback
 not evidence that an object is absent.'''
 
 
+def context_query(response, *, enabled):
+    """A discovery response cannot also submit a proposal or file calls."""
+    if not enabled:
+        raise ValueError("Semantic discovery is disabled for this task; return the required task output")
+    if set(response) != {"context_request"}:
+        raise ValueError("Return only context_request when querying; submit the task output in a separate response")
+    return response["context_request"]
+
+
 class DiscoveryStalled(ValueError):
     """Repeated identical results need a proposal or different evidence, not more searches."""
 

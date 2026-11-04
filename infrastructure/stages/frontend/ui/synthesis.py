@@ -13,6 +13,7 @@ from infrastructure.utils.files import save_json
 from infrastructure.shared.agent.proposals import propose_json
 from infrastructure.shared.agent.tasks import TaskFailures
 from infrastructure.shared.agent.discovery import ContextIndex
+from infrastructure.utils.paths import FILE_STEM_RULE, validate_file_stems
 
 
 def bind_requirement_image_pages(design, requirement, rid):
@@ -68,20 +69,19 @@ def synthesize_ui(arc_dir, tree, images, contexts, model, console, top_k=3, max_
             console.show(label + " | 3. Retrieved page subtrees (RAG)", json.dumps(retrieved, ensure_ascii=False, indent=2))
             request = {
                 "requirement": requirement, "retrieved_pages": retrieved["pages"],
-                "all_pages": {pid: {key: page[key] for key in ("name", "route", "root", "images")}
-                    for pid, page in design["pages"].items() if pid in retrieved["pages"]},
             }
             def accept(proposal):
                 try:
                     updated = apply_proposal(design, proposal, rid, tree)
                 except (KeyError, TypeError, AttributeError) as error:
                     raise UIResponseError(error, proposal) from error
+                validate_file_stems(updated["pages"], "page ID")
                 bind_requirement_image_pages(updated, requirement, rid)
                 for pid in proposal["pages"]:
                     console.show(label + f" | Page context {pid}", json.dumps(page_context(updated, pid), ensure_ascii=False, indent=2))
                 return updated
 
-            updated, proposal = propose_json(model, INSTRUCTIONS + "\n\n" + EXAMPLE_INSTRUCTIONS,
+            updated, proposal = propose_json(model, INSTRUCTIONS + "\nPage IDs: " + FILE_STEM_RULE + "\n\n" + EXAMPLE_INSTRUCTIONS,
                 request, accept, console, label, max_attempts, context_index=ContextIndex(lambda: {"page": design["pages"], "ui_element": design["elements"], "ui_data": data_symbols(design["elements"])}))
             console.show(label + " | 4. Incremental UI/data changes", json.dumps(proposal, ensure_ascii=False, indent=2))
             design = updated

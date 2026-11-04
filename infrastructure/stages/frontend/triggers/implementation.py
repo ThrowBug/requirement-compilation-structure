@@ -146,8 +146,11 @@ Implement the full path: UI event -> actual input/object identity -> request par
 body/headers -> real backend API -> success/rejection response -> updated state and visible UI.
 Use ordinary framework code: closures/callbacks, hooks, services or shared functions as
 appropriate. You may implement several related reference triggers together in components
-or helpers. No one-file-per-trigger rule, forced handle export, UiTriggerContext or central
-registry is required. Keep code reusable and incrementally preserve previous requirements.
+or helpers. If task.implementation_paths is supplied, every listed path is a required
+implementation file. Create missing files and wire them into the real interaction; a file
+may delegate to shared code. Do not create empty placeholders. If that map is absent, reuse
+or repair existing code without creating per-trigger files. No fixed handle export,
+UiTriggerContext or central registry is required.
 
 Preserve explicit original UI naming contracts during implementation and every repair:
 labels, action names, headings, region names, required placeholders and semantic roles.
@@ -218,8 +221,9 @@ Complete response processing before a full document navigation; prefer framework
 for an in-application route change so pending response processing is not interrupted.
 Correct a generated test only with original requirement evidence, preserving valid coverage.
 The gate compiles and runs current/accepted browser scenarios, affected backend HTTP suites,
-UI presence regression and final builds. Return ordinary edit_file calls; no path metadata
-or placeholder files for reference trigger IDs are required.
+UI presence regression and final builds. Submit changes as edit_file calls without path
+index metadata. If all required files and behavior already exist, use tool_calls=[] to
+run the same checks.
 
 For each failure, diagnose whether it comes from the requirement/test, application,
 backend/database startup, wiring, or environment, using actual logs and relevant files.

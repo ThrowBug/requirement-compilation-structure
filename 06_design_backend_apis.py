@@ -20,6 +20,7 @@ from infrastructure.shared.agent.proposals import propose_json
 from infrastructure.shared.agent.tasks import TaskFailures
 from infrastructure.shared.agent.discovery import ContextIndex
 from infrastructure.shared.agent.conventions import CONVENTION_RULES, load_conventions, select_conventions, merge_conventions
+from infrastructure.utils.paths import FILE_STEM_RULE, validate_file_stems
 
 
 INSTRUCTIONS = """Design complete backend APIs for the supplied leaf requirement and scenarios.
@@ -127,7 +128,7 @@ forms and post-mutation navigation. Include those read APIs in requirement_apis 
 when a mutation API already reads the same fields. Do not use transient browser state
 as a substitute for retrieving persisted data. Given setup is not a current API mutation.
 Use requirement_apis=[] for requirements with no backend behavior and empty obligations.
-Return only API definitions and requirement associations.
+Return apis and requirement_apis, plus optional conventions as specified in the convention rules.
 """
 
 
@@ -180,6 +181,7 @@ def design_backend_apis(arc_dir: Path, pause: bool = False, top_k: int = 6, max_
             def accept(response):
                 nonlocal conventions
                 updated = apply_decomposition(design, response, rid, obligations, tree=tree)
+                validate_file_stems(updated["apis"], "API ID")
                 check_symbols(updated["apis"].values(), schema)
                 revised = merge_conventions(conventions, response, rid, related)
                 selected = {aid: updated["apis"][aid] for aid in updated["requirements"][rid]}
@@ -193,7 +195,8 @@ def design_backend_apis(arc_dir: Path, pause: bool = False, top_k: int = 6, max_
                 conventions = revised
                 return updated
 
-            updated, _ = propose_json(model, INSTRUCTIONS + "\n\n" + CONVENTION_RULES, request, accept, console,
+            updated, _ = propose_json(model, INSTRUCTIONS + "\nAPI IDs: " + FILE_STEM_RULE + "\n\n" + CONVENTION_RULES,
+                request, accept, console,
                 f"Backend API design {rid}", max_attempts, context_index=ContextIndex(lambda: {"convention": conventions, "api": design["apis"], "schema": schema["entities"], "requirement": {key: requirement_context(tree, key) for key in tree.leaves}}))
             design = updated
             save_json(arc_dir / "backend_apis.json", design)

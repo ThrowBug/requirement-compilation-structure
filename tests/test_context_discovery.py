@@ -11,6 +11,38 @@ from infrastructure.shared.agent.tools import FileTools
 
 
 class ContextDiscovery(unittest.TestCase):
+    def test_design_rejects_mixed_or_disabled_discovery_before_accepting(self):
+        for index, error in [(ContextIndex({'api': {}}), 'Return only context_request'),
+                (None, 'Semantic discovery is disabled')]:
+            with self.subTest(error=error):
+                final = {'apis': {}}
+                mixed = {**final, 'context_request': {'kind': 'api', 'query': 'account'}}
+                model = Mock(generate_json=Mock(side_effect=[mixed, final]))
+                accept = Mock(return_value='accepted')
+                propose_json(model, '', {}, accept, Mock(), 'design', 2, index)
+                accept.assert_called_once_with(final)
+                self.assertIn(error, model.generate_json.call_args.args[1]['correction']['error'])
+
+    def test_file_agent_rejects_mixed_discovery_and_edits_without_applying_them(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = 'example.ts'
+            mixed = {'context_request': {'kind': 'api', 'query': 'account'}, 'tool_calls': [
+                {'tool': 'edit_file', 'path': path, 'operation': 'create', 'new_content': 'unexpected'}]}
+            def generate(_, request):
+                if not request['feedback']:
+                    return mixed
+                self.assertFalse((root / path).exists())
+                self.assertIn('Return only context_request', request['feedback'][0]['error'])
+                return {'tool_calls': []}
+            model = Mock(generate_json=Mock(side_effect=generate))
+            gate = Mock(return_value={})
+            run_file_agent(model, '', {}, FileTools(root, [path]), gate, 2, Mock(), 'file',
+                context_index=ContextIndex({'api': {}}))
+            self.assertFalse((root / path).exists())
+            self.assertEqual(model.generate_json.call_count, 2)
+            gate.assert_called_once()
+
     def test_candidates_paging_and_exact_field_reads(self):
         entities = {f'Account{i}': {'description': 'session account', 'fields': {'id': {'type': 'integer'}}} for i in range(10)}
         index = ContextIndex(lambda: {'schema': entities})

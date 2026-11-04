@@ -1,6 +1,6 @@
 """Shared tool definitions, parameter schemas and execution effects."""
 
-from .files import bind_target, edit_file, read_file
+from .files import SMALL_FILE_REPLACEMENT_LIMIT, bind_target, edit_file, read_file
 
 
 def definition(name, description, properties, required, example):
@@ -26,7 +26,8 @@ TOOL_REGISTRY = {
     "edit_file": (edit_file, definition("edit_file", "Create a new file, replace one unique exact text span, "
         "or prepend/append to an existing file. Paths are relative to the project working directory. "
         "replace needs a local old_content span copied from supplied/read source. "
-        "Never replace a whole existing file; preserve all earlier requirements and extend shared code incrementally.",
+        f"Whole-file replacement is limited to {SMALL_FILE_REPLACEMENT_LIMIT} characters after trimming. "
+        "Preserve earlier requirements and extend shared code incrementally.",
         {"path": STRING, "operation": {"type": "string", "enum": ["create", "replace", "prepend", "append"]},
             "old_content": STRING, "new_content": STRING}, ["path", "operation", "new_content"],
         {"tool": "edit_file", "path": "backend/src/example.ts", "operation": "replace",

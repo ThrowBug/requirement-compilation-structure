@@ -23,6 +23,13 @@ from infrastructure.utils import processes
 
 
 class PortableFiles(unittest.TestCase):
+    def test_design_filename_stems_reject_unfulfillable_targets(self):
+        from infrastructure.utils.paths import validate_file_stems
+        validate_file_stems(['Account', 'API-create', '页面', 'TR-save'], 'design ID')
+        for identities in (['TR:save'], ['a/b'], ['.hidden'], ['CON'], ['api-save', 'API-SAVE']):
+            with self.subTest(identities=identities), self.assertRaisesRegex(ValueError, 'portable single names'):
+                validate_file_stems(identities, 'design ID')
+
     """Exercise real edits and rollback with Windows-created source and Unicode paths."""
 
     def setUp(self):

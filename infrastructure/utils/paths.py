@@ -30,3 +30,23 @@ def check_path_case(root, relative: str) -> None:
         if matches and (part not in matches or len(matches) > 1):
             raise ValueError(f"Use one exact path spelling/case: {relative}; existing: {matches}")
         current = current / part
+
+
+FILE_STEM_RULE = ("IDs used in filenames must be portable single names: no path separators, "
+    "hidden names, Windows-reserved characters/names, or IDs differing only by case.")
+
+
+def validate_file_stems(identities, label):
+    """Reject design IDs that downstream file tools cannot use as filename stems."""
+    seen = {}
+    for identity in identities:
+        try:
+            if not isinstance(identity, str) or not identity or identity.startswith('.') or '/' in identity:
+                raise ValueError("expected a visible single filename stem")
+            relative_path(identity + '.ts')
+        except ValueError as error:
+            raise ValueError(f"Invalid {label} {identity!r}: {error}. {FILE_STEM_RULE}") from error
+        folded = identity.casefold()
+        if folded in seen and seen[folded] != identity:
+            raise ValueError(f"{label} {identity!r} collides with {seen[folded]!r}. {FILE_STEM_RULE}")
+        seen[folded] = identity

@@ -13,6 +13,44 @@ from tool_fixtures import propose_files
 
 
 class DesignContinuation(unittest.TestCase):
+    def test_schema_accepts_missing_section_completion_without_regenerating_entities(self):
+        stage = import_module('02_build_db_schema')
+        with TemporaryDirectory() as directory:
+            arc = Path(directory) / '.arc'
+            save_json(arc / 'requirements.json', {'id': 'ROOT', 'children': [{'id': 'REQ-A', 'name': 'Account'}]})
+            entities = {'Account': {'description': 'Account', 'fields': {'id': field('Identifier')}}}
+            model = Mock(generate_json=Mock(side_effect=[{'entities': entities}, {'related_fields': ['Account.id']}]))
+            with patch.object(stage, 'TextModel', return_value=model), patch.object(stage, 'DemoConsole', return_value=Mock()):
+                result = stage.build_db_schema(arc, max_attempts=2)
+            self.assertEqual(model.generate_json.call_count, 2)
+            self.assertEqual(result['entities'], entities)
+            self.assertEqual(result['requirements']['REQ-A'], ['Account.id'])
+
+    def test_schema_missing_associations_repairs_only_that_section_and_revalidates(self):
+        stage = import_module('02_build_db_schema')
+        with TemporaryDirectory() as directory:
+            arc = Path(directory) / '.arc'
+            save_json(arc / 'requirements.json', {'id': 'ROOT', 'children': [{'id': 'REQ-A', 'name': 'Account'}]})
+            entities = {'Account': {'description': 'Account', 'fields': {'id': field('Identifier')}}}
+            requests = []
+            def generate(prompt, payload):
+                requests.append(payload)
+                if len(requests) == 1:
+                    return {'entities': entities}
+                if len(requests) == 2:
+                    self.assertTrue(prompt.startswith('OUTPUT MODE: MISSING-FIELD REPAIR.'))
+                    self.assertIn("only 'related_fields'", prompt)
+                    self.assertEqual(payload['correction']['previous_response'], {'entities': entities})
+                    return {'related_fields': ['Account.missing']}
+                self.assertIn('undefined database fields', payload['correction']['error'])
+                self.assertIn('complete replacement', prompt)
+                return {'entities': entities, 'related_fields': ['Account.id']}
+            with patch.object(stage, 'TextModel', return_value=Mock(generate_json=generate)), \
+                    patch.object(stage, 'DemoConsole', return_value=Mock()):
+                result = stage.build_db_schema(arc, max_attempts=3)
+            self.assertEqual(result['requirements']['REQ-A'], ['Account.id'])
+            self.assertEqual(result['entities'], entities)
+
     def test_schema_failure_does_not_stop_later_requirement_or_obligation_inference(self):
         schema_stage = import_module('02_build_db_schema')
         obligation_stage = import_module('03_infer_db_obligations')
