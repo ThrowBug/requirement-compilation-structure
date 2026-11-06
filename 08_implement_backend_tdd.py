@@ -10,6 +10,7 @@ from infrastructure.shared.agent.discovery import project_index
 from infrastructure.shared.project.entrypoints import selected_path
 from infrastructure.shared.agent.loop import run_file_agent
 from infrastructure.shared.agent.recovery import implementation_task, final_checks, complete_report
+from infrastructure.shared.agent.tasks import require_design_task, UpstreamTaskError
 from infrastructure.stages.backend.context import load_context, requirement_context, api_requirement_uses, supplied_sources, related_schema
 from infrastructure.utils.files import read_artifact
 from infrastructure.stages.backend.runtime import REGISTER_PATH, TEST_RUNNER_PATH, TEST_SUPPORT_PATH, prepare_runtime, test_path
@@ -239,10 +240,21 @@ def implement_backend_tdd(arc_dir: Path, pause: bool = False, max_turns: int = 1
     install_dependencies(output)
     checkpoint(output, stage="08", task="runtime", action="Prepare backend wiring and dependencies",
         details={"api_ids": list(contracts["apis"]), "http_test_runner": TEST_RUNNER_PATH})
+    blocked = {}
+    for rid in tree.leaves:
+        try:
+            require_design_task(arc_dir, "06_design_backend_apis", rid, "backend_apis.json", contracts["requirements"])
+        except UpstreamTaskError as error:
+            blocked[rid] = {"status": "FAILED", "apis": [], "error": str(error), "blocked_by": error.blocked_by}
     if not contracts["apis"]:
         report = {"status": "NO_APIS", "tests": {}, "red": {}, "green": {}, "agents": {}, "summary": {"tests": 0, "pass": 0, "fail": 0}}
+        if blocked:
+            report.update(status="COMPLETED_WITH_FAILURES", requirements=blocked)
         save_json(arc_dir / "backend_tdd.json", report)
-        print("No Backend API Primitives require implementation; no tests or model calls were run.")
+        if blocked:
+            print(f"Backend implementation blocked for {len(blocked)} requirement(s); see .arc/backend_tdd.json. No model calls were run.")
+        else:
+            print("No Backend API Primitives require implementation; no tests or model calls were run.")
         return report
     checks = BackendChecks(output)
     routes = compiler_routes(output, contracts["apis"])
@@ -265,6 +277,10 @@ def implement_backend_tdd(arc_dir: Path, pause: bool = False, max_turns: int = 1
         files_by_api = {aid: [relative] for aid, relative in targets.items()}
         accepted, attempted = [], set()
         for requirement_number, rid in enumerate(tree.leaves, 1):
+            if rid in blocked:
+                report["requirements"][rid] = blocked[rid]
+                save_json(arc_dir / "backend_tdd.json", report)
+                continue
             ids = contracts["requirements"].get(rid, [])
             pending = [aid for aid in ids if aid not in attempted]
             requirement_label = f"Requirement {requirement_number}/{len(tree.leaves)} {rid}"
@@ -408,7 +424,7 @@ def implement_backend_tdd(arc_dir: Path, pause: bool = False, max_turns: int = 1
             build=(checks.build, None))
         final = verification["tests"].get("result") or {}
         report["summary"] = {key: final.get(key, 0) for key in ("tests", "pass", "fail")}
-        complete_report(report, report.get("apis", {}).values(), verification)
+        complete_report(report, [*report.get("apis", {}).values(), *blocked.values()], verification)
         save_json(arc_dir / "backend_tdd.json", report)
         print(f"TDD {report['status']}: {report['summary']}\nReport: {arc_dir / 'backend_tdd.json'}", flush=True)
         return report

@@ -1,6 +1,7 @@
 """Deterministic UI existence suites and bounded browser/typecheck commands."""
 
 from infrastructure.shared.agent.feedback import CheckFailure
+from infrastructure.shared.agent.files import SEMANTIC_TEST_ROOT
 
 import json
 import os
@@ -34,7 +35,19 @@ def test_path(pid: str) -> str:
     return f"frontend/tests/ui/{pid}.spec.ts"
 
 
-def existence_suite(design: dict, pid: str) -> str:
+SEMANTIC_HEADER = "// Compiler-owned presentation semantics. Derived from explicit requirements."
+
+
+def semantic_test_path(pid):
+    return SEMANTIC_TEST_ROOT + pid + ".spec.ts"
+
+
+def presentation_files(output, pages):
+    return [path for pid in pages for path in (test_path(pid), semantic_test_path(pid))
+        if (output / path).is_file()]
+
+
+def existence_suite(design: dict, pid: str, *, semantic_checks=None) -> str:
     """Supply test-local display data; check controls and actual application data keys."""
     page = design["pages"][pid]
     elements = page_elements(design, pid)
@@ -69,10 +82,16 @@ def existence_suite(design: dict, pid: str) -> str:
         if possible and candidate not in states:
             states.append(candidate)
 
-    lines = ['// Compiler-owned presence tests. Display values belong to this suite only.',
+    semantic = semantic_checks is not None
+    lines = [SEMANTIC_HEADER if semantic else '// Compiler-owned presence tests. Display values belong to this suite only.',
         'import { test, expect } from "@playwright/test";', '']
     for number, state in enumerate(states, 1):
-        lines.append(f'test({json.dumps(pid + " / display " + str(number) + " / UI element existence")}, async ({{ page }}) => {{')
+        visible_checks = {uid: semantic_checks[uid] for uid in elements
+            if semantic and uid in semantic_checks and visible(design, uid, state)}
+        if semantic and not visible_checks:
+            continue
+        purpose = "UI semantics" if semantic else "UI element existence"
+        lines.append(f'test({json.dumps(pid + " / display " + str(number) + " / " + purpose)}, async ({{ page }}) => {{')
         lines.extend([
             '  const runtimeErrors: string[] = [];',
             '  page.on("pageerror", error => runtimeErrors.push(error.message));',
@@ -83,17 +102,33 @@ def existence_suite(design: dict, pid: str) -> str:
             '  try {',
         ])
         for uid, node in elements.items():
+            if semantic:
+                if uid not in visible_checks:
+                    continue
+                record = visible_checks[uid]
+                locator = f"page.getByTestId({json.dumps(uid)})"
+                name, role = json.dumps(record["name"]), json.dumps(record["role"])
+                diagnostic = json.dumps(f'{uid}: {record["requirement_id"]} requires {record["name"]}')
+                if record["role"] == "password":
+                    lines.append(f'  await expect({locator}.and(page.getByLabel({name}, {{exact: true}})), {diagnostic}).toBeVisible();')
+                    lines.append(f'  await expect({locator}, {diagnostic}).toHaveAccessibleName({name});')
+                else:
+                    lines.append(f'  await expect({locator}.and(page.getByRole({role}, {{name: {name}, exact: true}})), {diagnostic}).toBeVisible();')
+                continue
             kind = node.get("type", "page" if uid == page["root"] else "container")
             if kind not in KEY_TYPES:
                 continue
             locator = f"page.getByTestId({json.dumps(uid)})"
             shown = visible(design, uid, state)
             lines.append(f"  await expect({locator}){'' if shown else '.not'}.toBeVisible();")
+        if not semantic:
+            lines.extend([
+                '  await expect.poll(() => page.evaluate(({ pageId, keys }) => {',
+                '    const state = (window as unknown as { __ARC_UI_DATA__?: { page: string; data: Record<string, unknown> } }).__ARC_UI_DATA__;',
+                '    return state?.page === pageId && keys.every(key => Object.prototype.hasOwnProperty.call(state.data, key));',
+                '  }, ' + json.dumps({"pageId": pid, "keys": sorted(variables)}) + ')).toBe(true);',
+            ])
         lines.extend([
-            '  await expect.poll(() => page.evaluate(({ pageId, keys }) => {',
-            '    const state = (window as unknown as { __ARC_UI_DATA__?: { page: string; data: Record<string, unknown> } }).__ARC_UI_DATA__;',
-            '    return state?.page === pageId && keys.every(key => Object.prototype.hasOwnProperty.call(state.data, key));',
-            '  }, ' + json.dumps({"pageId": pid, "keys": sorted(variables)}) + ')).toBe(true);',
             '  } catch (error) {',
             '    if (runtimeErrors.length) throw new Error("UI_RUNTIME_ERROR: " + runtimeErrors.join("\\n"));',
             '    throw error;',
@@ -101,7 +136,7 @@ def existence_suite(design: dict, pid: str) -> str:
             '  if (runtimeErrors.length) throw new Error("UI_RUNTIME_ERROR: " + runtimeErrors.join("\\n"));',
             '});', '',
         ])
-    return "\n".join(lines)
+    return "" if semantic and len(lines) == 3 else "\n".join(lines)
 
 
 def require_green(result: dict) -> None:

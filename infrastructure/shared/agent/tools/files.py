@@ -1,5 +1,7 @@
 """Workspace-relative file reading and exact local editing operations."""
 
+from difflib import SequenceMatcher
+
 import json
 from infrastructure.shared.agent.files import EXCLUDED
 from infrastructure.utils.files import normalize_newlines, read_source
@@ -103,6 +105,23 @@ def bind_target(files, path):
     return {"path": path, "target_kind": declaration.kind, "target_id": declaration.identity}
 
 
+def local_candidate(current, candidate, path):
+    """Convert exact full-text candidates only when most lines survive unchanged."""
+    before, after = current.splitlines(keepends=True), candidate.splitlines(keepends=True)
+    changes = SequenceMatcher(None, before, after, autojunk=False).get_opcodes()
+    retained = sum(end - start for kind, start, end, _, _ in changes if kind == "equal")
+    if retained * 2 <= max(len(before), len(after)):
+        raise FileToolError("WHOLE_FILE_REPLACEMENT_NOT_ALLOWED",
+            "The proposal rewrites most existing lines. Read the relevant function and submit "
+            "a unique local replacement, preserving unrelated imports, routes and behavior.", path,
+            preserved_lines=retained, original_lines=len(before), proposed_lines=len(after))
+    result = list(before)
+    for kind, start, end, new_start, new_end in reversed(changes):
+        if kind != "equal":
+            result[start:end] = after[new_start:new_end]
+    return "".join(result)
+
+
 def edit_file(files, path, operation, new_content, old_content=""):
     """Stage a create, unique exact replacement, prepend or append in the current batch."""
     files.path(path)  # Reject unsafe paths before attempting task-specific adaptation.
@@ -131,11 +150,10 @@ def edit_file(files, path, operation, new_content, old_content=""):
             if not old_content:
                 raise FileToolError("INVALID_ARGUMENTS", "replace requires nonempty exact old_content", path)
             if len(current.strip()) > SMALL_FILE_REPLACEMENT_LIMIT and current.strip() == old_content.strip():
-                raise FileToolError("WHOLE_FILE_REPLACEMENT_NOT_ALLOWED",
-                    "Incremental compilation forbids replacing a whole existing file over "
-                    f"{SMALL_FILE_REPLACEMENT_LIMIT} characters. "
-                    "Use one or more smaller unique spans, or append a new helper. Preserve earlier "
-                    "requirements, registrations and state. Copy old_content from the current file.", path)
+                if old_content != current:
+                    raise FileToolError("OLD_CONTENT_NOT_FOUND",
+                        "Whole-file source must match exactly, including whitespace", path)
+                new_content = local_candidate(current, new_content, path)
             first = current.find(old_content)
             count = 0 if first < 0 else (2 if current.find(old_content, first + 1) >= 0 else 1)
             if count != 1:

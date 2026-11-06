@@ -12,9 +12,11 @@ from infrastructure.shared.agent.discovery import project_index
 from infrastructure.shared.agent.loop import run_file_agent
 from infrastructure.shared.agent.recovery import implementation_task, final_checks, complete_report
 from infrastructure.shared.project.entrypoints import selected_path
-from infrastructure.stages.frontend.ui.design import owners, page_context
+from infrastructure.stages.frontend.ui.design import owners, page_context, page_elements
 from infrastructure.stages.frontend.ui.runtime import APPLICATION_ENTRYPOINTS, prepare_frontend
-from infrastructure.stages.frontend.ui.testing import FrontendChecks, existence_suite, require_green, test_path
+from infrastructure.stages.frontend.ui.testing import (
+    SEMANTIC_HEADER, FrontendChecks, existence_suite, presentation_files, require_green, semantic_test_path, test_path,
+)
 from infrastructure.shared.project.dependencies import install_dependencies
 from infrastructure.utils.files import save_json, save_text
 from infrastructure.shared.project.git import checkpoint
@@ -77,7 +79,7 @@ control/data-key assertions. Shared test/build infrastructure remains read-only.
 
 
 def implement_ui(arc_dir: Path, design: dict, model, console, report: dict, max_turns: int = 10,
-        images: dict | None = None, requirement_contexts: dict | None = None) -> dict:
+        images: dict | None = None, requirement_contexts: dict | None = None, semantic_contracts=None) -> dict:
     """Implement the complete saved UI/data design through component-existence TDD.
 
     Prepare the project and browser, generate initial presence tests, then
@@ -104,13 +106,25 @@ def implement_ui(arc_dir: Path, design: dict, model, console, report: dict, max_
         suite = existence_suite(design, pid)
         if not (output / relative).is_file():
             save_text(output / relative, suite)
+        elements = page_elements(design, pid)
+        semantic = {uid: check for uid, check in (semantic_contracts or {}).items() if uid in elements}
+        sidecar = output / semantic_test_path(pid)
+        semantic_suite = existence_suite(design, pid, semantic_checks=semantic) if semantic else ""
+        if sidecar.is_file() and not sidecar.read_text(encoding="utf-8-sig").startswith(SEMANTIC_HEADER):
+            raise ValueError(f"Reserved compiler semantic suite path already in use: {semantic_test_path(pid)}")
+        if semantic_suite:
+            save_text(sidecar, semantic_suite)
+        elif sidecar.is_file():
+            sidecar.unlink()
         report["pages"][pid] = {"status": "TESTS_READY", "requirements": uses, "test_path": relative}
+        if semantic_suite:
+            report["pages"][pid]["semantic_test_path"] = semantic_test_path(pid)
         save_json(arc_dir / "ui_checks.json", report)
         label = f"UI {number}/{len(design['pages'])} {pid}"
         checkpoint(output, stage="10", task=pid, action="Publish UI existence suite before implementation",
             status="TESTS_READY", details={"test_path": relative, "requirements": uses})
         console.show(label + " | Existence tests before implementation", (output / relative).read_text(encoding="utf-8"))
-        files = [test_path(key) for key in [*accepted, pid]]
+        files = presentation_files(output, [*accepted, pid])
 
         def implementation_checks():
             """Check model-owned application sources and selected page tests."""
@@ -149,7 +163,8 @@ def implement_ui(arc_dir: Path, design: dict, model, console, report: dict, max_
                     "implementation_path": selected_path(output, "page", pid)}
                 workspace = selection.workspace(target=("page", pid),
                     references=["frontend/src/ui-runtime.ts", relative, "frontend/package.json",
-                        "frontend/tsconfig.json", "frontend/playwright.ui.config.ts", *APPLICATION_ENTRYPOINTS])
+                        "frontend/tsconfig.json", "frontend/playwright.ui.config.ts", *APPLICATION_ENTRYPOINTS,
+                        *([semantic_test_path(pid)] if semantic_suite else [])])
                 report["pages"][pid]["status"] = "IMPLEMENTING"
                 agent = run_file_agent(model, INSTRUCTIONS, context, workspace, implementation_gate,
                     max_turns, console, label + " / Implementation", feedback=current,
@@ -162,7 +177,7 @@ def implement_ui(arc_dir: Path, design: dict, model, console, report: dict, max_
             console.show(label + " | GREEN", agent["checks"]["tests"]["output"])
         save_json(arc_dir / "ui_checks.json", report)
     console.show("UI final verification", "All page tasks were attempted. Run display regression and build, retaining any failures.")
-    files = [test_path(pid) for pid in design["pages"]]
+    files = presentation_files(output, design["pages"])
     verification = final_checks(console,
         typecheck=(lambda: checks.typecheck(files), None),
         tests=(lambda: checks.tests(files), require_green),

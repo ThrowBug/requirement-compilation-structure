@@ -43,11 +43,14 @@ Use semantic discovery only when input.context_kinds advertises the required sco
 use the supplied task and allowed file tools. Reading does not make protected files writable.
 
 INCREMENTAL COMPILATION IS MANDATORY
+For larger files, an exact full-text proposal can be converted to local line edits
+only when a majority of lines remain unchanged. Broad rewrites remain rejected.
+This checks edit locality; behavioral correctness still requires the real test gates.
 Each task extends the application already compiled for earlier requirements. The current
 requirement and supplied excerpts are a partial view, never a replacement specification
 for the entire application. Earlier behavior remains required even when omitted here.
-Read the relevant existing code and make local additions or corrections. Use whole-file
-replacement only under the small-file exception below. Do not empty a shared function
+Read the relevant existing code and make local additions or corrections. Follow the
+locality and small-file rules below. Do not empty a shared function
 and rebuild it for only this requirement, or delete earlier code to make room for new code.
 Preserve earlier imports, exports, functions, routes, request cases, state keys, seed
 records and test coverage. Extend existing shared functions/maps instead of replacing
@@ -60,8 +63,8 @@ edit_file is the only source-writing tool:
 - replace: old_content is nonempty and occurs exactly once. Copy it exactly from supplied
   content or read_file, including whitespace/newlines. new_content replaces that span;
   empty new_content deletes that local span only when correcting the relevant behavior.
-  Use a local span; whole-file replacement is allowed only for a tiny file/stub of at
-  most 160 non-edge-whitespace characters. Larger files require a smaller span.
+  Prefer a local span. Tiny files/stubs of at most 160 non-edge-whitespace characters
+  can be replaced directly; larger full-text candidates must preserve most lines as above.
   Expand matching context only to make it unique.
 - prepend/append: insert new_content at an existing file boundary, preserving everything else.
 For create/prepend/append, omit old_content or use an empty string. Include needed newlines.

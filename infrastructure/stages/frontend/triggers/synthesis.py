@@ -10,7 +10,7 @@ from infrastructure.stages.frontend.ui.design import data_symbols
 from infrastructure.utils.files import save_json, read_artifact
 from infrastructure.stages.database.obligations.records import normalize_obligations
 from infrastructure.shared.agent.proposals import propose_json
-from infrastructure.shared.agent.tasks import TaskFailures
+from infrastructure.shared.agent.tasks import TaskFailures, require_design_task
 from infrastructure.shared.agent.discovery import ContextIndex
 from infrastructure.utils.paths import FILE_STEM_RULE, validate_file_stems
 from infrastructure.shared.agent.conventions import load_conventions, select_conventions
@@ -71,9 +71,10 @@ def synthesize_triggers(arc_dir, ui, tree, backend, contexts, model, console, ma
             label = f"Trigger design {rid}"
             if not relevant_pages(ui, rid):
                 continue
+            require_design_task(arc_dir, "06_design_backend_apis", rid, "backend_apis.json", backend["requirements"])
             try:
                 validate_design({"apis": backend["apis"],
-                    "requirements": {rid: backend["requirements"].get(rid, [])}},
+                    "requirements": {rid: backend["requirements"][rid]}},
                     obligations, complete=False, tree=None)
             except ObligationCoverageError as error:
                 raise ValueError(f'Upstream backend contract cannot cover {rid}: {error}. '
@@ -84,7 +85,8 @@ def synthesize_triggers(arc_dir, ui, tree, backend, contexts, model, console, ma
             for dependency in (dependencies or {}).get(rid, ()):
                 pages.update(relevant_pages(ui, dependency))
             elements = {uid for page in pages.values() for uid in page["elements"]}
-            local_ui = {**ui, "pages": {pid: ui["pages"][pid] for pid in pages},
+            local_ui = {**{key: value for key, value in ui.items() if key != "presentation_contracts"},
+                "pages": {pid: ui["pages"][pid] for pid in pages},
                 "elements": {uid: ui["elements"][uid] for uid in elements},
                 "requirements": {rid: ui["requirements"].get(rid, [])},
                 "steps": {sid: ui["steps"].get(sid, []) for sid in tree.own_steps[rid]}}

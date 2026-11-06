@@ -10,7 +10,15 @@ This stage declares the interface only. Return no code, tests, API definitions, 
 production initial values, example runtime objects or display fixtures.
 
 OUTPUT CONTRACT
-Return one JSON object with four sibling keys: elements, pages, requirement_ui, step_ui.
+Return one JSON object with elements, pages, requirement_ui, step_ui, and optional
+presentation_contracts. Use presentation_contracts for explicitly required static
+control identities that apply whenever the element is visible. Each entry is
+{element_id, role, name, evidence}: evidence is the complete affirmative sentence
+from the requirement description or Then, copied verbatim. Role is the explicitly
+specified accessible role; use "password" for explicitly labeled masked inputs
+without an implicit role. Use the original accessible name verbatim. Associate the
+element in requirement_ui. Omit screenshot-only, conditional, negative, alternative,
+or dynamic names; preserve those requirements for scenario acceptance.
 elements maps ELEMENT IDs to {type, parent, mode, data, prop}. A page root has type
 "page" and parent=null. Other elements reference a parent ELEMENT ID. Use ordinary types:
 container, form, input, checkbox, select, button, text, heading, link, list, item, image,
@@ -31,7 +39,8 @@ Treat explicit UI names and roles in the original requirement as interface contr
 Preserve required labels, action names, region names and placeholders verbatim, including
 language, spelling and case. Do not paraphrase, add object-type prefixes, translate or
 concatenate aliases: a required "Name" field must not become "Shelf name". Record the
-wording in the existing element.prop; do not create a separate naming registry.
+wording in the existing element.prop. Presentation contracts cite requirement
+evidence for checks; they do not introduce alternate UI names.
 Explicit requirement wording takes precedence over visual-reference examples. Only choose
 wording freely when it is unspecified or alternatives are explicitly allowed. Business
 record names and user-entered values remain dynamic; example data is not fixed UI wording.
@@ -137,5 +146,7 @@ def apply_proposal(design, proposal, rid, tree):
         updated[kind].update(deepcopy(proposal[kind]))
     updated["requirements"][rid] = proposal["requirement_ui"]
     updated["steps"].update(deepcopy(proposal["step_ui"]))
+    if "presentation_contracts" in proposal or "presentation_contracts" in updated:
+        updated.setdefault("presentation_contracts", {})[rid] = deepcopy(proposal.get("presentation_contracts", []))
     normalize_design(updated, tree)
     return updated

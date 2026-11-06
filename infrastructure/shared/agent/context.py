@@ -5,7 +5,7 @@ import posixpath
 import re
 
 from infrastructure.shared.agent.feedback import compact_feedback
-from infrastructure.shared.agent.files import SHARED_SOURCES, editable_application_path, editable_sources, source_paths
+from infrastructure.shared.agent.files import SHARED_SOURCES, SEMANTIC_TEST_ROOT, editable_application_path, editable_sources, source_paths
 from infrastructure.shared.agent.tools import FileTools
 from infrastructure.shared.project.entrypoints import selected_path
 from infrastructure.utils.files import read_source
@@ -36,7 +36,8 @@ class SourceFiles:
 
     def is_test(self, relative):
         """Identify generated suites, leaving shared fixtures and test utilities read-only."""
-        return "/tests/e2e/acceptance/" not in relative and relative.startswith(self.tests_root + "/") and relative.endswith((".spec.ts", ".test.ts"))
+        return (not relative.startswith(SEMANTIC_TEST_ROOT) and "/tests/e2e/acceptance/" not in relative
+            and relative.startswith(self.tests_root + "/") and relative.endswith((".spec.ts", ".test.ts")))
 
     def include(self, workspace, paths):
         """Add selected files plus transitive local imports, preserving write protection."""

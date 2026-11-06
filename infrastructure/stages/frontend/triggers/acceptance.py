@@ -13,6 +13,7 @@ from infrastructure.shared.agent.loop import FileGateHandoff, run_file_agent
 from infrastructure.shared.agent.context import SourceFiles
 from infrastructure.shared.agent.discovery import project_index
 from infrastructure.shared.agent.recovery import implementation_task
+from infrastructure.shared.agent.tasks import require_design_task, UpstreamTaskError
 from infrastructure.shared.project.entrypoints import selected_path
 from infrastructure.stages.backend.context import requirement_context, related_schema
 from infrastructure.stages.backend.testing import BackendChecks, require_green as require_backend_green
@@ -23,7 +24,7 @@ from infrastructure.stages.frontend.triggers.testing import E2EChecks, test_path
 from infrastructure.stages.frontend.triggers.scope import TriggerCheckFailure
 from infrastructure.stages.frontend.triggers.design import api_ids
 from infrastructure.stages.frontend.ui.runtime import APPLICATION_ENTRYPOINTS
-from infrastructure.stages.frontend.ui.testing import FrontendChecks, require_green, test_path as ui_test_path
+from infrastructure.stages.frontend.ui.testing import FrontendChecks, presentation_files, require_green
 from infrastructure.utils.files import read_artifact, save_bytes, save_json, save_text
 from infrastructure.shared.project.git import checkpoint
 
@@ -162,29 +163,26 @@ def normalize_exact_role_locators(output, path, task):
         save_text(suite, rewritten)
 
 
-def failure_signatures(result):
-    """Compare assertions without ANSI rendering, source excerpts or timing counters."""
-    signatures = set()
-    for message in result.get('failures', []):
-        clean = re.sub(r'\x1b\[[0-9;]*m', '', message)
-        lines = [line.strip() for line in clean.splitlines() if line.strip()]
-        if not lines:
-            continue
-        location = next((line for line in reversed(lines) if line.startswith('Test file: ')), '')
-        assertion = tuple(line for line in lines if line.startswith(('Locator:', 'Expected')))
-        if site := re.search(r'\bat [^\n]*?\.spec\.ts:(\d+:\d+)', clean):
-            assertion += (site[1],)
-        signatures.add((location, lines[0], assertion))
-    return signatures
-
-
-class ReviewNewFailure(FileGateHandoff):
-    def __init__(self, result):
-        self.result = result
-
-
-class ReviewInitialFailure(ReviewNewFailure):
+class ReviewOracle(FileGateHandoff):
     """Ask the isolated reviewer to evaluate a suspected oracle problem."""
+    def __init__(self, result, diagnosis):
+        self.result, self.diagnosis = result, diagnosis
+
+
+def current_suite_failure(result, path, ran_regressions):
+    """A mixed or unattributed regression cannot authorize changing the current oracle."""
+    failures = (result or {}).get('failures', [])
+    if not failures or result.get('errors'):
+        return False
+    if not ran_regressions:
+        return True
+    return all(failure_in_suite(message, path) for message in failures)
+
+
+def failure_in_suite(message, path):
+    location = next((line.strip().removeprefix('Test file: ').replace('\\', '/')
+        for line in reversed(message.splitlines()) if line.strip().startswith('Test file: ')), '')
+    return bool(location) and (location == path or path.endswith('/' + location))
 
 
 def require_acceptance(result):
@@ -320,6 +318,9 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
         report['requirements'][rid] = entry
         label = 'Independent acceptance / ' + rid
         try:
+            require_design_task(arc_dir, "06_design_backend_apis", rid, "backend_apis.json", backend["requirements"])
+            require_design_task(arc_dir, "11_design_frontend_triggers", rid,
+                "frontend_triggers.json", design["requirements"])
             context = scenario_context(ui, design, rid)
             aids = set(backend['requirements'].get(rid, []))
             for trigger in context['triggers'].values():
@@ -349,10 +350,10 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                 references=[FIXTURE, OBSERVATIONS, 'backend/tests/support/context.ts'],
                 readable=[path, FIXTURE, OBSERVATIONS, 'backend/tests/support/context.ts'])
 
-            def compile_suite():
+            def compile_suite(*, normalize=True):
                 if not (output / path).is_file():
                     raise ValueError('Create the supplied acceptance test_path')
-                if primary:
+                if primary and normalize:
                     normalize_exact_role_locators(output, path, task)
                 result = checks.typecheck([path], full_source=False)
                 if result['returncode']:
@@ -381,8 +382,8 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                     verdict.update(diagnosis)
 
                 try:
-                    review = run_file_agent(model, REVIEW_INSTRUCTIONS, task, workspace, compile_suite,
-                        max_turns, console, label + ' / ' + action, include_conventions=False,
+                    review = run_file_agent(model, REVIEW_INSTRUCTIONS, task, workspace,
+                        lambda: compile_suite(normalize=False), max_turns, console, label + ' / ' + action, include_conventions=False,
                         feedback=compact_feedback(feedback), validate_response=validate)
                 except BaseException:
                     if not suite.is_file() or suite.read_bytes() != before:
@@ -438,8 +439,7 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                 process_files = [test_path(key, output) for key in process_ids
                     if (output / test_path(key, output)).is_file()]
                 acceptance_files = [acceptance_path(key) for key in [*accepted, rid]]
-                ui_files = [ui_test_path(pid) for pid in ui['pages']
-                    if (output / ui_test_path(pid)).is_file()]
+                ui_files = presentation_files(output, ui['pages'])
                 peer, paired = paired_action_context(ui, design, rid) if primary else (None, None)
                 if peer in tree.requirements and paired:
                     context = {'page_subtrees': {**context['page_subtrees'], **paired['page_subtrees']},
@@ -484,10 +484,13 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                         repair_workspace = FirstEditWorkspace(repair_workspace)
                 else:
                     backend_selection.include(repair_workspace, backend_selection.paths('api', aids))
-                reviewed_failures = failure_signatures(result)
-                extra_review = False
+                latest_acceptance = result
+                ran_regressions = False
+                repair_reviews = 0
 
                 def repair_gate():
+                    nonlocal latest_acceptance, ran_regressions
+                    latest_acceptance = None
                     evidence = {}
                     check = 'typecheck'
                     try:
@@ -495,11 +498,9 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                         if evidence['typecheck']['returncode']:
                             raise ValueError(evidence['typecheck']['output'])
                         check = 'acceptance'
-                        evidence['acceptance'] = checks.tests(acceptance_files)
-                        new_failures = failure_signatures(evidence['acceptance']) - reviewed_failures
-                        if new_failures and test_run_status(evidence['acceptance']) != 'GREEN':
-                            raise ReviewNewFailure(evidence['acceptance'])
-                        require_acceptance(evidence['acceptance'])
+                        latest_acceptance = evidence['acceptance'] = checks.tests(acceptance_files)
+                        ran_regressions = len(acceptance_files) > 1
+                        require_acceptance(latest_acceptance)
                         if process_files:
                             check = 'smoke'
                             evidence['smoke'] = checks.tests(process_files)
@@ -534,14 +535,20 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                         if repair_workspace.received_initial_feedback:
                             repair_workspace.edit_first = False
                         repair_workspace.received_initial_feedback = True
-                    return selection.feedback(repair_workspace, backend_selection.feedback(repair_workspace, value))
+                    feedback = selection.feedback(repair_workspace, backend_selection.feedback(repair_workspace, value))
+                    repair_workspace.files.update(relative for relative in acceptance_files
+                        if any(failure_in_suite(message, relative)
+                            for message in (latest_acceptance or {}).get('failures', [])))
+                    return feedback
 
                 with implementation_task(output, entry, console, label + ' / Repair'):
                     instructions = IMPLEMENT_INSTRUCTIONS + '\n\n' + (
                         'Independent acceptance suites are read-only for implementation repair. '
                         'Preserve their original requirement outcomes and repair the real application. '
                         'Do not change consent defaults or persisted inputs to accommodate missing test actions '
-                        'or invented expectations. Newly exposed assertions return to independent review.')
+                        'or invented expectations. Treat newly reached assertions and failures of earlier '
+                        'passing suites as application repair evidence. Only request isolated review for a '
+                        'specific current-suite assertion or fixture that conflicts with the original requirement.')
                     if primary:
                         instructions += (' The suite is the sole behavioral test for this requirement. '
                             'Use trigger_handoff: reuse accepted actions and the listed existing handlers; '
@@ -554,8 +561,8 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                             'When exact labels fail, check both literal punctuation and text generated by CSS '
                             '::before/::after; keep decorative required markers out of accessible names. '
                             'Before editing, provide diagnosis.cause=implementation or environment with a '
-                            'specific diagnosis.reason. If the failure appears to be a test defect or is uncertain, report diagnosis.cause '
-                            'as test_requirement_mismatch, test_overconstraint or uncertain with no edits '
+                            'specific diagnosis.reason. If evidence shows a test defect, report diagnosis.cause '
+                            'as test_requirement_mismatch or test_overconstraint with no edits '
                             'so an isolated reviewer can check the suite.')
                         if peer in tree.requirements and paired:
                             instructions += (' The paired_requirement shares an existing control but uses a '
@@ -573,10 +580,17 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                     def route_oracle_problem(response):
                         diagnosis = response.get('diagnosis')
                         cause = diagnosis.get('cause') if isinstance(diagnosis, dict) else None
-                        if cause in {'test_requirement_mismatch', 'test_overconstraint', 'uncertain'}:
-                            raise ReviewInitialFailure(repair_evidence['acceptance'])
-                        if (cause not in {'implementation', 'environment'}
-                                or not isinstance(diagnosis.get('reason'), str) or not diagnosis['reason'].strip()):
+                        reason = diagnosis.get('reason') if isinstance(diagnosis, dict) else None
+                        if cause in {'test_requirement_mismatch', 'test_overconstraint'}:
+                            if not isinstance(reason, str) or not reason.strip() or response['tool_calls']:
+                                raise ValueError('Request test review with specific requirement evidence and no edits')
+                            if not current_suite_failure(latest_acceptance, path, ran_regressions):
+                                raise ValueError('Only failures attributable to the current suite can request test review; preserve earlier suites')
+                            if repair_reviews:
+                                raise ValueError('The isolated test review budget is spent. Use the reviewed oracle and available application evidence.')
+                            raise ReviewOracle(latest_acceptance, diagnosis)
+                        if primary and (cause not in {'implementation', 'environment'}
+                                or not isinstance(reason, str) or not reason.strip()):
                             raise ValueError('Diagnose the application or runtime failure with concrete evidence before editing')
 
                     while turns_used < max_turns:
@@ -585,42 +599,23 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                                 repair_gate, max_turns - turns_used, console, label + ' / Repair',
                                 feedback=repair_evidence, feedback_filter=repair_feedback, context_index=context_index,
                                 allow_discovery=not prefer_edit,
-                                validate_response=route_oracle_problem if primary else None)
+                                validate_response=route_oracle_problem)
                             turns_used += repair['turns']
                             accepted_checks = repair['checks']
                             break
-                        except ReviewNewFailure as handoff:
+                        except ReviewOracle as handoff:
                             turns_used += handoff.turns
+                            repair_reviews += 1
                             entry['new_failure'] = handoff.result
-                            new = failure_signatures(handoff.result) - reviewed_failures
-                            own_failures = all(location and path.endswith('/' + location.removeprefix('Test file: ').replace('\\', '/'))
-                                for location, _, _ in new)
-                            if extra_review or not (own_failures or isinstance(handoff, ReviewInitialFailure)):
-                                raise ValueError('New independent acceptance failure requires separate review; '
-                                    'stopped application repair') from handoff
-                            extra_review = True
-                            verdict, turns, changed = review_suite(handoff.result, 'New failure review')
+                            verdict, turns, changed = review_suite(
+                                {'acceptance': handoff.result, 'suspected_defect': handoff.diagnosis}, 'Test defect review')
                             entry.update(new_failure_review_turns=turns, new_failure_diagnosis=verdict)
-                            reviewed_failures.update(failure_signatures(handoff.result))
                             if changed:
                                 try:
                                     accepted_checks = repair_gate()
                                 except TriggerCheckFailure as error:
-                                    tested = error.feedback['checks'].get('acceptance')
-                                    if tested is not None and test_run_status(tested) == 'GREEN':
-                                        # The corrected oracle passed. Remaining smoke,
-                                        # runtime and build failures are still repairable.
-                                        repair_evidence = {'acceptance': tested, 'regression': error.feedback}
-                                        continue
-                                    if isinstance(handoff, ReviewInitialFailure) and tested is not None:
-                                        reviewed_failures.update(failure_signatures(tested))
-                                        repair_evidence = {'acceptance': tested, 'regression': error.feedback}
-                                        continue
-                                    raise ValueError('Independent acceptance still fails after the bounded test correction') from error
-                                except ReviewNewFailure as error:
-                                    entry['new_failure_after_review'] = error.result
-                                    raise ValueError('Independent acceptance or regression still fails after '
-                                        'the bounded test correction') from error
+                                    repair_evidence = {'acceptance': latest_acceptance, 'regression': error.feedback}
+                                    continue
                                 break
                             if verdict['cause'] != 'implementation':
                                 raise ValueError('New failure was not attributed to the application: ' + verdict['reason'])
@@ -645,6 +640,8 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
             implemented.update(design['requirements'].get(rid, ()))
         except (ValueError, RuntimeError) as error:
             entry.update(status='FAILED', error=str(error))
+            if isinstance(error, UpstreamTaskError):
+                entry["blocked_by"] = error.blocked_by
         finally:
             save_json(arc_dir / 'independent_acceptance.json', report)
             checkpoint(output, stage="12", task=rid, action="Publish independent requirement acceptance",

@@ -9,13 +9,14 @@ import json
 from infrastructure.shared.agent.files import editable_application_path
 from infrastructure.shared.agent.loop import run_file_agent
 from infrastructure.shared.agent.recovery import implementation_task, final_checks, complete_report
+from infrastructure.shared.agent.tasks import require_design_task, UpstreamTaskError
 from infrastructure.shared.agent.context import SourceFiles
 from infrastructure.shared.agent.discovery import project_index
 from infrastructure.shared.project.entrypoints import selected_path
 from infrastructure.stages.frontend.triggers.e2e_runtime import CONFIG, FIXTURE, OBSERVATIONS, prepare_e2e
 from infrastructure.stages.frontend.triggers.testing import E2EChecks, test_path
 from infrastructure.stages.frontend.ui.runtime import APPLICATION_ENTRYPOINTS, prepare_frontend
-from infrastructure.stages.frontend.ui.testing import FrontendChecks, require_green, test_path as ui_test_path
+from infrastructure.stages.frontend.ui.testing import FrontendChecks, presentation_files, require_green
 from infrastructure.stages.backend.context import related_schema
 from infrastructure.stages.backend.testing import BackendChecks, require_green as require_backend_green
 from infrastructure.stages.frontend.triggers.design import api_ids, trigger_obligations
@@ -252,8 +253,7 @@ def check_frontend_baseline(arc_dir, ui, checks, model, console, report, max_tur
     """Recover inherited type and UI failures before generating business suites."""
     output = arc_dir.parent.resolve()
     ui_checks = FrontendChecks(output)
-    baseline_files = [ui_test_path(pid) for pid in ui["pages"]
-        if (output / ui_test_path(pid)).is_file()]
+    baseline_files = presentation_files(output, ui["pages"])
 
     def baseline_gate():
         """Check inherited sources independently of the next business requirement."""
@@ -320,6 +320,15 @@ def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts
     save_json(arc_dir / "frontend_e2e.json", report)
     check_frontend_baseline(arc_dir, ui, checks, model, console, report, max_turns)
     for number, rid in enumerate(tree.leaves, 1):
+        try:
+            require_design_task(arc_dir, "06_design_backend_apis", rid, "backend_apis.json", backend["requirements"])
+            require_design_task(arc_dir, "11_design_frontend_triggers", rid,
+                "frontend_triggers.json", design["requirements"])
+        except UpstreamTaskError as error:
+            report["requirements"][rid] = {"status": "FAILED", "triggers": [],
+                "error": str(error), "blocked_by": error.blocked_by}
+            save_json(arc_dir / "frontend_e2e.json", report)
+            continue
         tids = set(design["requirements"][rid])
         steps = tree.own_steps[rid]
         label = f"E2E requirement {number}/{len(tree.leaves)} {rid}"
@@ -331,7 +340,7 @@ def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts
             continue
         targets = tids | (set(context["triggers"]) - implemented)
         relative = test_path(rid, output)
-        ui_files = [ui_test_path(pid) for pid in pages if (output / ui_test_path(pid)).is_file()]
+        ui_files = presentation_files(output, pages)
         called = {aid for trigger in context["triggers"].values() for aid in api_ids(trigger)}
         context["obligations"] = {tid: trigger_obligations(trigger, backend) for tid, trigger in context["triggers"].items()}
         context.update({"requirement": contexts[rid],
@@ -484,7 +493,7 @@ def verify_frontend(arc_dir, tree, backend, ui, console, report, *, suites=None)
     files = suites if suites is not None else [test_path(rid, output) for rid in tree.leaves
         if report["requirements"].get(rid, {}).get("status") != "NO_TRIGGERS"
         and (output / test_path(rid, output)).is_file()]
-    ui_files = [ui_test_path(pid) for pid in ui["pages"] if (output / ui_test_path(pid)).is_file()]
+    ui_files = presentation_files(output, ui["pages"])
     api_checks = BackendChecks(output)
     api_files = [path for aid in backend["apis"]
         if (path := selected_path(output, "backend_test", aid)) and (output / path).is_file()]

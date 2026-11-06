@@ -6,10 +6,10 @@ from pathlib import Path
 
 from infrastructure.stages.backend.context import load_context, requirement_context, api_requirement_uses
 from infrastructure.stages.database.obligations.records import check_symbols
-from infrastructure.stages.backend.primitives import apply_decomposition, validate_design
+from infrastructure.stages.backend.primitives import apply_decomposition, validate_design, ObligationCoverageError
 from infrastructure.utils.cli import create_parser, resolve_directories
 from infrastructure.shared.models.text import TextModel
-from infrastructure.stages.database.obligations.rules import union
+from infrastructure.stages.database.obligations.rules import union, difference
 from infrastructure.utils.presentation.formatting import format_apis
 from infrastructure.utils.presentation.console import DemoConsole
 from infrastructure.utils.presentation.logging import console_log
@@ -178,9 +178,36 @@ def design_backend_apis(arc_dir: Path, pause: bool = False, top_k: int = 6, max_
                 "shared_conventions": select_conventions(conventions, fields=related, requirements=[rid]),
                 "retrieved_apis": retrieved["apis"], "api_inventory": list(retrieved["apis"]),
             }
+            previous_conflict = None
             def accept(response):
-                nonlocal conventions
-                updated = apply_decomposition(design, response, rid, obligations, tree=tree)
+                nonlocal conventions, previous_conflict
+                try:
+                    updated = apply_decomposition(design, response, rid, obligations, tree=tree)
+                except ObligationCoverageError as error:
+                    changed = {aid: {"previous_contract": design["apis"][aid],
+                        "added": difference(api, design["apis"][aid]),
+                        "removed": difference(design["apis"][aid], api)}
+                        for aid, api in response["apis"].items()
+                        if aid in design["apis"] and api != design["apis"][aid]}
+                    consumers = {owner: {"requirement": requirement_context(tree, owner),
+                        "obligations": obligations["requirements"][owner], "api_ids": ids}
+                        for owner, ids in design["requirements"].items()
+                        if owner != rid and any(aid in changed for aid in ids)}
+                    if consumers:
+                        error.feedback["shared_contract_conflict"] = {
+                            "proposed_for": rid, "changed_apis": changed, "consumers": consumers,
+                            "repair": "Use original consumer scenarios and previous contracts to preserve accepted "
+                                "behavior. Do not enlarge obligations or invent an endpoint to bypass coverage. "
+                                "Distinct operations require original requirement evidence. If obligations "
+                                "conflict with original requirements, review stage 03 before retrying stage 06."}
+                        if error.feedback["requirement_id"] in consumers:
+                            conflict = {key: error.feedback[key] for key in ("requirement_id", "missing", "excess")}
+                            if previous_conflict == conflict:
+                                raise RuntimeError("Shared contract repair repeated the same coverage conflict "
+                                    f"for {conflict['requirement_id']}: {conflict}. Review stage 03 obligations "
+                                    "against the original consumer requirements before retrying stage 06.") from error
+                            previous_conflict = conflict
+                    raise
                 validate_file_stems(updated["apis"], "API ID")
                 check_symbols(updated["apis"].values(), schema)
                 revised = merge_conventions(conventions, response, rid, related)

@@ -7,6 +7,7 @@ SHARED_SOURCES = {"backend/src/api/register.ts", "backend/src/app.ts", "backend/
     "frontend/src/main.tsx", "frontend/src/App.tsx", "frontend/src/ui-api.ts"}
 
 EXCLUDED = {"node_modules", ".git", ".arc", "dist", "build", "coverage", "__pycache__", ".venv"}
+SEMANTIC_TEST_ROOT = "frontend/tests/ui/semantic/"
 
 
 def source_paths(output: Path, root: str) -> list[str]:
@@ -32,4 +33,5 @@ def editable_application_path(output, relative):
             and not relative.startswith("backend/src/db/")))
     return (relative.startswith(("backend/tests/", "frontend/tests/"))
         and relative.endswith((".test.ts", ".spec.ts"))
+        and not relative.startswith(SEMANTIC_TEST_ROOT)
         and "/tests/e2e/acceptance/" not in relative and not (templates / relative).is_file())

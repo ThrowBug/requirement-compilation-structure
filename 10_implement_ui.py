@@ -2,10 +2,13 @@
 
 from contextlib import ExitStack
 from pathlib import Path
+import yaml
 
 from infrastructure.utils.cli import create_parser, resolve_directories
 from infrastructure.stages.frontend.context import load_ui_context, load_ui_design
 from infrastructure.stages.frontend.ui.implementation import implement_ui
+from infrastructure.stages.frontend.ui.semantics import validated_contracts
+from infrastructure.stages.requirements.tree import RequirementTree
 from infrastructure.shared.models.text import TextModel
 from infrastructure.utils.presentation.console import DemoConsole
 from infrastructure.utils.presentation.logging import console_log
@@ -30,8 +33,12 @@ def implement_frontend_ui(input_dir: Path, arc_dir: Path, pause: bool = False,
             save_json(arc_dir / "ui_checks.json", report)
             print("No pages require implementation; no model calls, dependency installation or browser tests were run.", flush=True)
             return report
+        contracts = {}
+        if design.get("presentation_contracts"):
+            original = RequirementTree(yaml.safe_load((input_dir / "requirements.yaml").read_text(encoding="utf-8-sig")))
+            contracts, report["deferred_presentation_contracts"] = validated_contracts(design, original)
         result = implement_ui(arc_dir, design, TextModel(), console, report, max_turns,
-            images=images, requirement_contexts=contexts)
+            images=images, requirement_contexts=contexts, semantic_contracts=contracts)
         print(f"UI existence TDD {result['status']}. Checks: {arc_dir / 'ui_checks.json'}", flush=True)
         return result
     except BaseException as error:

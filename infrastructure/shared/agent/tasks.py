@@ -3,7 +3,26 @@
 from contextlib import contextmanager
 
 from infrastructure.shared.project.git import checkpoint
-from infrastructure.utils.files import save_json
+from infrastructure.utils.files import save_json, read_artifact
+
+
+class UpstreamTaskError(ValueError):
+    def __init__(self, stage, identity, artifact, reason):
+        self.blocked_by = {"stage": stage, "task": identity, "artifact": artifact, "reason": reason}
+        super().__init__(f"Blocked by {stage} / {identity} ({artifact}): {reason}")
+
+
+def require_design_task(arc_dir, stage, identity, artifact, assignments):
+    """Distinguish accepted empty associations from failed or missing designs."""
+    report = arc_dir / "stage_tasks" / (stage + ".json")
+    if report.is_file():
+        entry = read_artifact(report.parent, report.name).get("tasks", {}).get(identity)
+        if entry is None:
+            raise UpstreamTaskError(stage, identity, artifact, "Task has not published an accepted result")
+        if entry.get("status") != "GREEN":
+            raise UpstreamTaskError(stage, identity, artifact, entry.get("error", "Task is not accepted"))
+    if identity not in assignments:
+        raise UpstreamTaskError(stage, identity, artifact, "No accepted requirement association; not an explicit empty list")
 
 
 class StageIncomplete(RuntimeError):
@@ -30,6 +49,8 @@ class TaskFailures:
                 raise
             self.report['tasks'][identity] = {'status': 'FAILED', 'error': str(error),
                 'error_type': type(error).__name__}
+            if isinstance(error, UpstreamTaskError):
+                self.report["tasks"][identity]["blocked_by"] = error.blocked_by
             self.console.show(self.stage + ' / ' + identity + ' | FAILED; continuing', str(error))
         else:
             self.report['tasks'][identity] = {'status': 'GREEN'}

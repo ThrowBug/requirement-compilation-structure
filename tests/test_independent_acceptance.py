@@ -73,7 +73,7 @@ class IndependentAcceptance(unittest.TestCase):
             self.assertEqual((root / suite).read_text(), 'original assertions')
             self.assertEqual(report['requirements']['REQ-C']['status'], 'GREEN')
 
-    def test_new_assertion_after_application_fix_returns_to_read_only_oracle_review(self):
+    def test_specific_oracle_defect_after_application_fix_can_be_reviewed(self):
         self.check_new_assertion()
 
     def test_application_repair_can_continue_after_oracle_correction_and_build_failure(self):
@@ -102,8 +102,12 @@ class IndependentAcceptance(unittest.TestCase):
             def generate(prompt, payload):
                 task, feedback = payload['task'], payload['feedback']
                 if 'repair_reason' in task:
-                    calls.append('application')
                     self.assertFalse(payload['files'][suite]['writable'])
+                    if 'Expected substring: 203' in str(feedback):
+                        calls.append('oracle diagnosis')
+                        return propose_files(root, [], diagnosis={'cause': 'test_overconstraint',
+                            'reason': 'Original requires a future date, not a year prefix'})
+                    calls.append('application')
                     if calls.count('application') == 2:
                         self.assertIn('build failed', str(feedback))
                         return propose_files(root, [{'path': source, 'content': 'fixed label and build'}])
@@ -128,11 +132,11 @@ class IndependentAcceptance(unittest.TestCase):
                     patch('infrastructure.stages.frontend.triggers.acceptance.BackendChecks'), \
                     patch('infrastructure.stages.frontend.triggers.acceptance.FrontendChecks'):
                 report = run_independent_acceptance(input_dir, root / '.arc', {'entities': {}}, backend, ui,
-                    triggers, Mock(generate_json=generate), Mock(), max_turns=2 if build_failure else 1,
+                    triggers, Mock(generate_json=generate), Mock(), max_turns=3 if build_failure else 2,
                     process_report={'requirements': {}, 'verification': {}})
-            self.assertEqual(calls, ['original review', 'application', 'new oracle review'] + (['application'] if build_failure else []))
+            self.assertEqual(calls, ['original review', 'application', 'oracle diagnosis', 'new oracle review'] + (['application'] if build_failure else []))
             self.assertEqual(report['status'], 'GREEN')
-            self.assertEqual(report['requirements']['REQ-A']['repair_turns'], 2 if build_failure else 1)
+            self.assertEqual(report['requirements']['REQ-A']['repair_turns'], 3 if build_failure else 2)
             self.assertEqual((root / source).read_text(), 'fixed label and build' if build_failure else 'fixed label')
 
     def test_generated_routes_and_conventions_do_not_become_the_acceptance_oracle(self):
@@ -250,6 +254,68 @@ class IndependentAcceptance(unittest.TestCase):
             self.assertEqual(report['status'], 'GREEN')
             self.assertEqual(calls, ['implementation diagnosis', 'isolated review'])
             self.assertEqual((root / path).read_text(), 'scoped selector')
+
+    def test_new_application_failures_and_older_regression_continue_after_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_dir, ui, triggers, backend = self.setup_workspace(root)
+            earlier, current = map(acceptance_path, ('REQ-A', 'REQ-B'))
+            source = 'frontend/src/App.tsx'
+            save_text(root / source, 'starting application')
+            calls = []
+
+            def browser(paths):
+                step = (root / source).read_text()
+                if current not in paths or step == 'fixed both workflows':
+                    return {'returncode': 0, 'passed': len(paths), 'failed': 0}
+                if step == 'new submit works':
+                    message, suite = 'Earlier save regressed', earlier
+                elif step == 'labels fixed':
+                    message, suite = 'Submit does not persist data', current
+                else:
+                    message, suite = 'Required label missing', current
+                return {'returncode': 1, 'failed': 1, 'passed': 0,
+                    'failures': [message + '\nTest file: ' + suite.removeprefix('frontend/tests/e2e/')]}
+
+            def generate(prompt, payload):
+                task = payload['task']
+                if 'Review this independent acceptance test' in prompt:
+                    calls.append('review')
+                    return propose_files(root, [], diagnosis={'cause': 'implementation',
+                        'reason': 'The missing label is explicitly required'})
+                if 'original_requirement' in task:
+                    return propose_files(root, [{'path': task['test_path'], 'content': 'original assertions'}])
+                self.assertEqual(task['test_path'], current)
+                self.assertFalse(payload['files'][current]['writable'])
+                feedback = str(payload['feedback'])
+                if not calls:
+                    calls.append('suspect')
+                    return propose_files(root, [], diagnosis={'cause': 'test_overconstraint',
+                        'reason': 'Check whether the missing label is an explicit original requirement'})
+                if 'Earlier save regressed' in feedback:
+                    self.assertFalse(payload['files'][earlier]['writable'])
+                    change = 'fixed both workflows'
+                elif 'Submit does not persist data' in feedback:
+                    change = 'new submit works'
+                else:
+                    change = 'labels fixed'
+                calls.append(change)
+                return propose_files(root, [{'path': source, 'content': change}],
+                    diagnosis={'cause': 'implementation', 'reason': 'Repair the failing browser behavior'})
+
+            checks = Mock()
+            checks.typecheck.return_value = checks.build.return_value = {'returncode': 0}
+            checks.tests.side_effect = browser
+            with patch('infrastructure.stages.frontend.triggers.acceptance.E2EChecks', return_value=checks), \
+                    patch('infrastructure.stages.frontend.triggers.acceptance.BackendChecks'), \
+                    patch('infrastructure.stages.frontend.triggers.acceptance.FrontendChecks'):
+                report = run_independent_acceptance(input_dir, root / '.arc', {'entities': {}}, backend, ui,
+                    triggers, Mock(generate_json=generate), Mock(), max_turns=4, primary=True,
+                    process_report={'requirements': {}, 'verification': {}})
+            self.assertEqual(report['status'], 'GREEN', report)
+            self.assertEqual(calls, ['suspect', 'review', 'labels fixed', 'new submit works', 'fixed both workflows'])
+            self.assertEqual((root / earlier).read_text(), 'original assertions')
+            self.assertEqual((root / current).read_text(), 'original assertions')
 
     def test_primary_revalidates_a_cached_suite_when_the_original_requirement_changes(self):
         with tempfile.TemporaryDirectory() as directory:
