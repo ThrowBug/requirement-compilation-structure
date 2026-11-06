@@ -37,6 +37,9 @@ def implement_frontend_ui(input_dir: Path, arc_dir: Path, pause: bool = False,
         if design.get("presentation_contracts"):
             original = RequirementTree(yaml.safe_load((input_dir / "requirements.yaml").read_text(encoding="utf-8-sig")))
             contracts, report["deferred_presentation_contracts"] = validated_contracts(design, original)
+            report["presentation_contract_corrections"] = [
+                {"requirement_id": item["requirement_id"], "from": item["original_element_id"], "to": uid}
+                for uid, item in contracts.items() if "original_element_id" in item]
         result = implement_ui(arc_dir, design, TextModel(), console, report, max_turns,
             images=images, requirement_contexts=contexts, semantic_contracts=contracts)
         print(f"UI existence TDD {result['status']}. Checks: {arc_dir / 'ui_checks.json'}", flush=True)

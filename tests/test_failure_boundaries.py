@@ -18,8 +18,7 @@ def call(tool, **arguments):
 
 
 class FailureBoundaries(unittest.TestCase):
-    def test_unchanged_shared_conflict_stops_before_exhausting_all_proposals(self):
-        from infrastructure.shared.agent.tasks import StageIncomplete
+    def test_repeated_shared_conflict_can_be_repaired_on_third_proposal(self):
         stage = import_module("06_design_backend_apis")
         with TemporaryDirectory() as directory:
             arc, _, design = prepare_artifacts(Path(directory))
@@ -29,16 +28,16 @@ class FailureBoundaries(unittest.TestCase):
                 calls.append(rid)
                 ids = design["requirements"][rid]
                 apis = {aid: {**deepcopy(design["apis"][aid]), **conditions(aid)} for aid in ids}
-                if rid == "REQ-B":
+                if rid == "REQ-B" and calls.count(rid) < 3:
                     apis["API-SAVE"]["write"].append("Note.tag")
                 return {"apis": apis, "requirement_apis": ids}
             with patch.object(stage, "TextModel", return_value=Mock(generate_json=generate)), \
                     patch.object(stage, "DemoConsole", return_value=Mock()):
-                with self.assertRaises(StageIncomplete):
-                    stage.design_backend_apis(arc)
-            self.assertEqual(calls, ["REQ-A", "REQ-B", "REQ-B", "REQ-C"])
+                result = stage.design_backend_apis(arc)
+            self.assertEqual(calls, ["REQ-A", "REQ-B", "REQ-B", "REQ-B", "REQ-C"])
             persisted = json.loads((arc / "backend_apis.json").read_text())
-            self.assertNotIn("REQ-B", persisted["requirements"])
+            self.assertEqual(persisted, result)
+            self.assertEqual(persisted["requirements"]["REQ-B"], ["API-SAVE"])
             self.assertEqual(persisted["requirements"]["REQ-C"], ["API-COUNT"])
 
     def test_shared_contract_conflict_supplies_prior_evidence_and_rejects_added_writes(self):

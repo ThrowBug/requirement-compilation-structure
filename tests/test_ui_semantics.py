@@ -23,12 +23,12 @@ def fixture():
     secret = 'The masked password field has the accessible name "Access key".'
     forbidden = 'Do not display a link named "Delete".'
     tree = RequirementTree({"id": "EDITOR", "description": "\n".join((title, secret, forbidden))})
-    def node(kind):
-        return {"type": kind, "parent": "ROOT", "prop": {}, "data": [], "mode": []}
+    def node(kind, **props):
+        return {"type": kind, "parent": "ROOT", "prop": props, "data": [], "mode": []}
     design = {"pages": {}, "elements": {}, "requirements": {}, "steps": {}}
     proposal = {"pages": {"editor": {"route": "/", "root": "ROOT"}},
-        "elements": {"ROOT": {**node("page"), "parent": None}, "PUBLISH": node("button"),
-            "KEY": node("input"), "DELETE": node("link")},
+        "elements": {"ROOT": {**node("page"), "parent": None}, "PUBLISH": node("button", text="Publish"),
+            "KEY": node("input", input_type="password", label="Access key"), "DELETE": node("link", text="Delete")},
         "requirement_ui": ["ROOT", "PUBLISH", "KEY", "DELETE"], "step_ui": {},
         "presentation_contracts": [
             {"element_id": "PUBLISH", "role": "button", "name": "Publish", "evidence": title},
@@ -40,6 +40,30 @@ def fixture():
 
 
 class UiSemantics(unittest.TestCase):
+    def test_rebinds_only_to_a_unique_control_in_the_same_requirement(self):
+        tree, design = fixture()
+        elements = design["elements"]
+        entry = design["presentation_contracts"]["EDITOR"][0]
+        entry["element_id"] = "CANCEL"
+        elements["CANCEL"] = {**elements["PUBLISH"], "prop": {"text": "Cancel"}}
+        design["requirements"]["EDITOR"].append("CANCEL")
+        checks, _ = validated_contracts(design, tree)
+        self.assertEqual(checks["PUBLISH"]["original_element_id"], "CANCEL")
+        self.assertNotIn("CANCEL", checks)
+        self.assertEqual(entry["element_id"], "CANCEL")
+
+        elements["OTHER_PUBLISH"] = {**elements["PUBLISH"]}
+        design["requirements"]["EDITOR"].append("OTHER_PUBLISH")
+        checks, deferred = validated_contracts(design, tree)
+        self.assertNotIn("PUBLISH", checks)
+        self.assertNotIn("OTHER_PUBLISH", checks)
+        self.assertEqual(deferred[0]["candidate_element_ids"], ["OTHER_PUBLISH", "PUBLISH"])
+
+        design["requirements"]["EDITOR"] = ["CANCEL"]
+        checks, deferred = validated_contracts(design, tree)
+        self.assertEqual(checks, {})
+        self.assertEqual(deferred[0]["candidate_element_ids"], [])
+
     def test_stage10_runs_semantics_alongside_preserved_existing_suite(self):
         from infrastructure.stages.frontend.ui.implementation import implement_ui
         tree, design = fixture()

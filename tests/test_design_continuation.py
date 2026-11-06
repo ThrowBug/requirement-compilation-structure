@@ -75,7 +75,8 @@ class DesignContinuation(unittest.TestCase):
             self.assertEqual(schema['requirements']['GOOD'], ['Account.id'])
             model = Mock(generate_json=Mock(return_value={
                 'requirement': {'read': ['Account.id'], 'write': []}, 'steps': {}}))
-            with patch.object(obligation_stage, 'TextModel', return_value=model), \
+            reviewer = Mock(generate_json=Mock(return_value={'decision': 'no_write', 'reason': 'Read an existing account.'}))
+            with patch.object(obligation_stage, 'TextModel', side_effect=[model, reviewer]), \
                     patch.object(obligation_stage, 'DemoConsole', return_value=Mock()):
                 with self.assertRaises(StageIncomplete):
                     obligation_stage.infer_db_obligations(arc, max_attempts=1)
@@ -83,6 +84,7 @@ class DesignContinuation(unittest.TestCase):
             self.assertNotIn('BAD', obligations['requirements'])
             self.assertEqual(obligations['requirements']['GOOD']['read'], ['Account.id'])
             model.generate_json.assert_called_once()
+            reviewer.generate_json.assert_called_once()
 
     def test_api_design_failure_preserves_later_valid_contracts(self):
         from test_backend_contracts import prepare_artifacts, conditions

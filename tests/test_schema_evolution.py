@@ -76,10 +76,14 @@ class SchemaEvolution(unittest.TestCase):
             self.assertEqual(len(requests), 3)
             self.assertEqual(schema['requirements']['REQ-1'], sorted(fixed['related_fields']))
             self.assertEqual(json.loads((arc / 'db_schema.json').read_text()), schema)
-            inference = Mock(generate_json=Mock(return_value={'requirement': {'read': ['Session.id'], 'write': []}, 'steps': {}}))
-            with patch.object(stage3, 'TextModel', return_value=inference), patch.object(stage3, 'DemoConsole', return_value=Mock()):
+            inference = Mock(generate_json=Mock(side_effect=[
+                {'requirement': {'read': ['Session.id'], 'write': []}, 'steps': {}},
+                {'requirement': {'read': [], 'write': ['Account.id', 'Session.id']}, 'steps': {}}]))
+            reviewer = Mock(generate_json=Mock(return_value={'decision': 'no_write', 'reason': 'Read an existing session.'}))
+            with patch.object(stage3, 'TextModel', side_effect=[inference, reviewer]), patch.object(stage3, 'DemoConsole', return_value=Mock()):
                 result = stage3.infer_db_obligations(arc)
             self.assertEqual(inference.generate_json.call_count, 2)
+            reviewer.generate_json.assert_called_once()
             self.assertEqual(result['requirements']['REQ-1']['read'], ['Session.id'])
 
     def test_legacy_invalid_artifact_has_clear_error_before_model_request(self):

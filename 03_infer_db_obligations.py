@@ -52,6 +52,30 @@ Include persisted re-reads required by reload, navigation or reopening an editor
 returning data from a create operation does not replace a later retrieval operation.
 """
 
+EMPTY_WRITE_REVIEW = """Review a candidate with no database writes. Use the original
+requirement and Given/When/Then to decide whether the behavior itself creates, updates,
+or deletes persistent state on any branch. Given setup, read-only operations, rejected
+operations, and transient UI state do not imply writes. Related fields alone are not
+proof of a write. Do not invent writes or redesign the schema.
+Return { "decision": "missing_write" | "no_write" | "uncertain", "reason": "...",
+"evidence": "verbatim original requirement excerpt" }. For missing_write, cite the
+original text describing the persistence behavior, not just a setup action.
+"""
+
+
+def validate_write_review(response, request):
+    decision, reason = response["decision"], response["reason"]
+    if decision not in {"missing_write", "no_write", "uncertain"} or not isinstance(reason, str) or not reason.strip():
+        raise ValueError("Return a write-review decision and a specific reason")
+    evidence = response.get("evidence", "")
+    if decision == "missing_write":
+        sources = [request["requirement"]["name"], request["requirement"]["description"],
+            *(step[field] for step in request["steps"] for field in ("When", "Then"))]
+        if not isinstance(evidence, str) or not evidence.strip() or not any(
+                isinstance(source, str) and evidence in source for source in sources):
+            raise ValueError("A missing write needs a verbatim quote from the requirement name, description, When or Then")
+    return {"decision": decision, "reason": reason, "evidence": evidence}
+
 
 def infer_db_obligations(arc_dir: Path, pause: bool = False, top_k: int = 6, max_attempts: int = 10) -> dict:
     for filename, previous in (("requirements.json", "01_explore_requirement.py"), ("db_schema.json", "02_build_db_schema.py")):
@@ -66,6 +90,7 @@ def infer_db_obligations(arc_dir: Path, pause: bool = False, top_k: int = 6, max
     # An unmapped concept should trigger schema review, not a fabricated field.
     console = DemoConsole(pause)
     model = TextModel()
+    reviewer = None
     # Organizational parents keep empty records; only leaves receive model inference.
     obligations = {"requirements": {rid: {"read": [], "write": []} for rid in tree.requirements if tree.children[rid]},
         "steps": {sid: {"read": [], "write": []} for rid in tree.requirements if tree.children[rid] for sid in tree.own_steps[rid]}}
@@ -104,9 +129,28 @@ def infer_db_obligations(arc_dir: Path, pause: bool = False, top_k: int = 6, max
                 "related_fields": sorted(related_fields),
                 "related_schema": {"entities": related_entities},
             }
+            write_review = None
+
             def accept(response):
+                nonlocal reviewer, write_review
                 inferred = normalize_inference(response, tree.own_steps[rid])
                 check_symbols([inferred["requirement"], *inferred["steps"].values()], schema)
+                if related_fields and not inferred["requirement"]["write"]:
+                    if write_review is None:
+                        # Keep the review's response-cache state separate from the proposal.
+                        if reviewer is None:
+                            reviewer = TextModel()
+                        review_input = {key: request[key] for key in ("requirement", "steps", "related_fields")}
+                        write_review, _ = propose_json(reviewer, EMPTY_WRITE_REVIEW,
+                            {**review_input, "candidate": inferred}, lambda value: validate_write_review(value, request),
+                            console, f"Empty write review {rid}", max_attempts=1)
+                        console.show(f"{label} | Empty write review", json.dumps(write_review, ensure_ascii=False))
+                    if write_review["decision"] == "missing_write":
+                        raise ValueError("Review found a missing persistent write: "
+                            f"{write_review['reason']} Evidence: {write_review['evidence']!r}. "
+                            "Return corrected requirement and step obligations using existing schema fields.")
+                    if write_review["decision"] == "uncertain":
+                        raise RuntimeError("Cannot confirm the empty write obligation: " + write_review["reason"])
                 summary = format_obligations({rid: inferred["requirement"], **inferred["steps"]})
                 return inferred, summary
 

@@ -178,9 +178,8 @@ def design_backend_apis(arc_dir: Path, pause: bool = False, top_k: int = 6, max_
                 "shared_conventions": select_conventions(conventions, fields=related, requirements=[rid]),
                 "retrieved_apis": retrieved["apis"], "api_inventory": list(retrieved["apis"]),
             }
-            previous_conflict = None
             def accept(response):
-                nonlocal conventions, previous_conflict
+                nonlocal conventions
                 try:
                     updated = apply_decomposition(design, response, rid, obligations, tree=tree)
                 except ObligationCoverageError as error:
@@ -200,13 +199,6 @@ def design_backend_apis(arc_dir: Path, pause: bool = False, top_k: int = 6, max_
                                 "behavior. Do not enlarge obligations or invent an endpoint to bypass coverage. "
                                 "Distinct operations require original requirement evidence. If obligations "
                                 "conflict with original requirements, review stage 03 before retrying stage 06."}
-                        if error.feedback["requirement_id"] in consumers:
-                            conflict = {key: error.feedback[key] for key in ("requirement_id", "missing", "excess")}
-                            if previous_conflict == conflict:
-                                raise RuntimeError("Shared contract repair repeated the same coverage conflict "
-                                    f"for {conflict['requirement_id']}: {conflict}. Review stage 03 obligations "
-                                    "against the original consumer requirements before retrying stage 06.") from error
-                            previous_conflict = conflict
                     raise
                 validate_file_stems(updated["apis"], "API ID")
                 check_symbols(updated["apis"].values(), schema)
