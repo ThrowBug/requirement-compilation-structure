@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 from tempfile import TemporaryDirectory
 
@@ -38,7 +39,7 @@ function inspect(filename, marker = false) {
 }
 function seedMarker(filename) {
   const db = new Database(filename);
-  try { db.exec('CREATE TABLE "__arc_startup_probe" (value TEXT); INSERT INTO "__arc_startup_probe" VALUES (\'preserve\');'); }
+  try { db.exec('CREATE TABLE IF NOT EXISTS "__arc_startup_probe" (value TEXT); INSERT OR IGNORE INTO "__arc_startup_probe" VALUES (\'preserve\');'); }
   finally { db.close(); }
 }
 function setup(command, filename, marker = false) {
@@ -106,6 +107,13 @@ try {
     phase = "missing-table recovery"; setup(plan.setup, database, true);
   }
   phase = "compiled initialization"; setup([process.execPath, "backend/dist/db/setup.js"], database, true);
+  if (plan.existing_database) {
+    // The copied database may not contain the private marker table yet. Seed
+    // it only in the disposable copy before checking existing-data safety.
+    seedMarker(plan.existing_database);
+    phase = "existing database initialization"; setup(plan.setup, plan.existing_database, true);
+    phase = "existing server startup"; await startup(plan.existing_database, true);
+  }
   const startupDatabase = join(plan.directory, "startup.db");
   phase = "fresh server startup"; await startup(startupDatabase);
   seedMarker(startupDatabase);
@@ -129,6 +137,17 @@ class DatabaseChecks:
         if not self.node:
             raise ValueError("Node.js is required for database initialization checks")
 
+    @staticmethod
+    def _copy_database(source: Path, target: Path) -> None:
+        """Copy a live SQLite database through SQLite so WAL data is included."""
+        source_connection = sqlite3.connect(f"file:{source.as_posix()}?mode=ro", uri=True)
+        target_connection = sqlite3.connect(target)
+        try:
+            source_connection.backup(target_connection)
+        finally:
+            target_connection.close()
+            source_connection.close()
+
     def run(self):
         try:
             check_existing_tables(self.output, self.schema)
@@ -143,6 +162,14 @@ class DatabaseChecks:
                 plan = {"directory": temporary, "database": str(self.output / "backend/data/app.db"),
                     "tables": {name: list(entity["fields"]) for name, entity in self.schema["entities"].items()},
                     "setup": [*npm_command(), "run", "db:init", "--workspace", "@arc/backend"]}
+                existing = self.output / "backend/data/app.db"
+                if existing.is_file():
+                    existing_copy = Path(temporary) / "existing.db"
+                    try:
+                        self._copy_database(existing, existing_copy)
+                    except (OSError, sqlite3.Error) as error:
+                        return {"returncode": 1, "phase": "copy existing database", "error": str(error)}
+                    plan["existing_database"] = str(existing_copy)
                 runner = Path(temporary) / "check-database.mjs"
                 arguments = Path(temporary) / "plan.json"
                 runner.write_text(PROBE_SOURCE, encoding="utf-8")

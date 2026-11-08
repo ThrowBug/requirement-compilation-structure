@@ -14,8 +14,10 @@ from infrastructure.shared.project.git import checkpoint
 from infrastructure.shared.usage.recorder import UsageRecorder, current_recorder, record_event
 from infrastructure.shared.artifacts.dependency_graph import DependencyGraph
 from infrastructure.shared.project.resume import BAD_STATUS, ResumeManager, runtime_environment, snapshot
+from infrastructure.shared.project.finalization import clean_runtime_database, record_runtime_database_origin
 from infrastructure.shared.agent.experiments import OptimizationOptions, optimization_scope
 from infrastructure.shared.agent.failures import observe_failure
+from infrastructure.shared.models import ProviderTransportUnavailable
 
 
 class Compiler:
@@ -42,7 +44,7 @@ class Compiler:
         self.report = {"status": "NOT_STARTED", "stages": {}}
 
     def _run(self, module: str, function: str, *arguments, **options):
-        """Attempt every pass; keep failures explicit without aborting later passes."""
+        """Record each pass; abort compilation if a model request fails."""
         self.current_stage = module + ".py"
         manager = self.resume_manager
         if manager and not manager.should_run(module):
@@ -58,6 +60,7 @@ class Compiler:
         before = snapshot(self.output_dir, application=True) if manager else None
         if manager:
             manager.mark_task_started(module, "stage")
+        fatal = None
         try:
             with console_log(self.output_dir, stage=self.current_stage,
                     model_log=self.model_log, debug_model_io=self.model_log):
@@ -75,10 +78,17 @@ class Compiler:
             observe_failure(error, will_retry=False, stage=module)
             result = {"status": "FAILED", "error": str(error),
                 "error_type": type(error).__name__, "traceback": traceback.format_exc()}
+            if request := getattr(error, "upstream_repair_request", None):
+                result["upstream_repair_request"] = request
             if getattr(error, "failures", None):
                 result.update(status="COMPLETED_WITH_FAILURES", failures=error.failures)
-            show_panel("[FAILED; continuing] " + module,
-                result["error"] + "\nAccepted artifacts remain available. Attempt the next pass.", tone="error")
+            if isinstance(error, ProviderTransportUnavailable):
+                fatal = error
+                self.report["status"] = "FAILED"
+                show_panel("[FAILED; stopping] " + module, result["error"], tone="error")
+            else:
+                show_panel("[FAILED; continuing] " + module,
+                    result["error"] + "\nAccepted artifacts remain available. Attempt the next pass.", tone="error")
         status = result.get("status", "GREEN") if isinstance(result, dict) else "GREEN"
         self.report["stages"][module] = {"status": status}
         if manager:
@@ -86,12 +96,14 @@ class Compiler:
         if recorder := current_recorder():
             recorder.stage_result(module, status)
         if isinstance(result, dict):
-            for key in ("failures", "verification", "error", "error_type", "traceback"):
+            for key in ("failures", "verification", "error", "error_type", "traceback", "upstream_repair_request"):
                 if key in result:
                     self.report["stages"][module][key] = result[key]
         save_json(self.arc_dir / "compilation.json", self.report)
         checkpoint(self.output_dir, stage=module, task="stage report", action="Publish pass result",
             status=status, details=self.report["stages"][module])
+        if fatal is not None:
+            raise fatal
         return result
 
     def compile(self) -> Path:
@@ -126,6 +138,8 @@ class Compiler:
         """Execute the 13 compilation passes in order and return the generated application directory."""
         self.artifacts.clear()
         self.report = {"status": "RUNNING", "stages": {}}
+        runtime_database_origin = record_runtime_database_origin(
+            self.output_dir, reset=not self.resume_enabled)
         show_panel("Requirement compiler | Pipeline",
             f"Input: {self.input_dir}\nOutput: {self.output_dir}\nPasses: 13\nDetailed model logs: {'enabled' if self.model_log else 'disabled'}")
         stages = (
@@ -153,6 +167,16 @@ class Compiler:
         self.current_stage = None
         incomplete = [stage for stage, result in self.report["stages"].items()
             if result["status"] in {"FAILED", "COMPLETED_WITH_FAILURES"}]
+        if self.until_stage == 12 and not incomplete:
+            try:
+                self.report["deployment_cleanup"] = clean_runtime_database(
+                    self.output_dir, runtime_database_origin)
+            except (OSError, ValueError) as error:
+                self.report["deployment_cleanup"] = {"status": "FAILED", "error": str(error)}
+                incomplete.append("deployment_cleanup")
+            checkpoint(self.output_dir, stage="compiler", task="deployment cleanup",
+                action="Remove compiler-created runtime databases from the final application",
+                status=self.report["deployment_cleanup"]["status"], details=self.report["deployment_cleanup"])
         self.report["status"] = ("COMPLETED_WITH_FAILURES" if incomplete else
             "GREEN_PREFIX" if self.until_stage < 12 else "GREEN")
         from infrastructure.shared.artifacts.coverage import build_coverage_matrix

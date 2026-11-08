@@ -9,6 +9,11 @@ searchbox slider spinbutton status switch tab table textbox toolbar tree treeite
 SENTENCE = re.compile(r'(?<=[。！？!?])|(?<=\.)\s+|\n')
 ROLE_REFERENCE = re.compile(r'["“]([^"”\r\n]+)["”]\s*\(\s*role\s*=\s*([a-z][\w-]*)\s*\)')
 QUOTED = re.compile(r'["“][^"”\r\n]+["”]')
+QUOTED_TEXT = re.compile(r'["“]([^"”\r\n]+)["”]')
+CONTRACT_CONTEXT = re.compile(
+    r'\b(?:accessible\s+name|placeholder|label(?:ed|led)?|named|caption|button|link|field|input|checkbox|select|control)\b',
+    re.I,
+)
 # Unsupported scoped assertions belong in browser scenarios. This is a conservative
 # filter on model-proposed evidence, not a parser for arbitrary requirement prose.
 SCOPED = re.compile(r"\b(?:no|not|never|without|cannot|if|unless|when|only|either|or|may|except|until|after|before)\b"
@@ -19,6 +24,49 @@ DIRECT_ROLES["image"] = "img"
 INPUT_ROLES = {"password": "password", "number": "spinbutton", "search": "searchbox",
     "checkbox": "checkbox", "radio": "radio", "button": "button", "submit": "button",
     "text": "textbox", "email": "textbox", "tel": "textbox", "url": "textbox"}
+
+
+def role_evidence_pattern(role):
+    """Accept ordinary requirement wording for a uniquely identified control role."""
+    patterns = {
+        "password": r'\bpassword\s+(?:inputs?|fields?)\b|密码(?:字段|输入框)',
+        "textbox": r'\b(?:textbox|text\s+(?:input|field)|input|field|username|email|mobile(?:\s+number)?)\b',
+        "combobox": r'\b(?:combobox|select|dropdown|drop-down|field)\b',
+        "listbox": r'\b(?:listbox|select|dropdown|drop-down)\b',
+        "img": r'\b(?:img|image|logo)\b',
+    }
+    return patterns.get(role, rf'\b{re.escape(role)}\b')
+
+
+def _derived_contract_entries(design, tree, existing):
+    """Derive only quoted, explicit control names omitted by the design proposal."""
+    derived = []
+    for rid in tree.requirements:
+        owned = set(design.get("requirements", {}).get(rid, ()))
+        texts = [tree.requirements[rid]["description"],
+            *(tree.steps[sid]["Then"] for sid in tree.own_steps[rid])]
+        sentences = {sentence.strip() for value in texts if isinstance(value, str)
+            for sentence in SENTENCE.split(value) if sentence.strip()}
+        for uid in sorted(owned & design.get("elements", {}).keys()):
+            identity = control_identity(design["elements"][uid])
+            if not identity:
+                continue
+            role, name = identity
+            key = (rid, uid, role, name)
+            if key in existing:
+                continue
+            for sentence in sentences:
+                quoted_names = set(QUOTED_TEXT.findall(sentence))
+                clause = QUOTED.sub("", sentence)
+                if (name not in quoted_names or SCOPED.search(clause)
+                        or not CONTRACT_CONTEXT.search(clause)
+                        or not re.search(role_evidence_pattern(role), clause, re.I)):
+                    continue
+                derived.append({"requirement_id": rid, "element_id": uid, "role": role,
+                    "name": name, "evidence": sentence})
+                existing.add(key)
+                break
+    return derived
 
 
 def control_identity(node):
@@ -48,9 +96,23 @@ def control_identity(node):
 def validated_contracts(design, tree):
     """Return verified checks by element ID, and candidates requiring scenario review."""
     checks, conflicts, deferred = {}, set(), []
-    if not isinstance(design.get("presentation_contracts", {}), dict):
+    contracts = design.get("presentation_contracts", {})
+    if contracts is None:
+        contracts = {}
+    if not isinstance(contracts, dict):
         return {}, [{"reason": "invalid presentation contract collection"}]
-    for rid, entries in design.get("presentation_contracts", {}).items():
+    entries_by_requirement = {rid: (list(entries) if isinstance(entries, list) else entries)
+        for rid, entries in contracts.items()}
+    existing = set()
+    for rid, entries in entries_by_requirement.items():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict):
+                existing.add((rid, entry.get("element_id"), entry.get("role"), entry.get("name")))
+    for entry in _derived_contract_entries(design, tree, existing):
+        entries_by_requirement.setdefault(entry["requirement_id"], []).append(entry)
+    for rid, entries in entries_by_requirement.items():
         if rid not in tree.requirements or not isinstance(entries, list):
             deferred.append({"requirement_id": rid, "reason": "invalid presentation contract owner or list"})
             continue
@@ -73,8 +135,7 @@ def validated_contracts(design, tree):
                 deferred.append(record)
                 continue
             record["element_id"] = uid
-            role_evidence = (r'\bpassword\s+(?:inputs?|fields?)\b|密码(?:字段|输入框)'
-                if role == "password" else rf'\b{re.escape(role)}\b')
+            role_evidence = role_evidence_pattern(role)
             pairs = ROLE_REFERENCE.findall(evidence)
             clause = QUOTED.sub("", evidence)
             if (role not in ROLES

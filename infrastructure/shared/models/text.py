@@ -6,6 +6,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import OpenAI, OpenAIError
+from infrastructure.shared.models import REQUEST_MAX_RETRIES, ProviderTransportUnavailable
 from infrastructure.utils.presentation.model_io import http_client, invoke
 from infrastructure.shared.agent.context_broker import compact_json, has_context_marker, intern_context, REFERENCE_RULES
 from infrastructure.shared.agent.experiments import options, ResponseCache
@@ -71,7 +72,7 @@ class TextModel:
         self.client = OpenAI(
             api_key=api_key,
             base_url=os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1",
-            timeout=600, max_retries=2,
+            timeout=600, max_retries=REQUEST_MAX_RETRIES,
             http_client=http_client(),
         )
 
@@ -145,7 +146,7 @@ class TextModel:
                 **reasoning_arguments(model_name, mode),
             )
         except OpenAIError as error:
-            raise RuntimeError(f"Text model request failed: {error}") from error
+            raise ProviderTransportUnavailable(f"Text model request failed: {error}") from error
         if response.choices and response.choices[0].finish_reason == "length":
             raise ValueError(
                 f"Model output was truncated (finish_reason=length). The output budget is "

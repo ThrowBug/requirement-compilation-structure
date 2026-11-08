@@ -8,10 +8,47 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
 
+import httpx2
+
+import main
 from infrastructure.compiler import Compiler
+from infrastructure.shared.models import ProviderTransportUnavailable
+from infrastructure.shared.models.vision import VisualModel
 
 
 class PipelineContinuation(unittest.TestCase):
+    def test_exhausted_503_stops_compilation_before_another_task_or_pass(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'input'
+            source.mkdir()
+            (source / 'requirements.yaml').write_text('id: ROOT\nchildren:\n  - id: FIRST\n  - id: SECOND\n')
+            compiler = Compiler(source, root / 'application')
+            handler = Mock(side_effect=lambda _: httpx2.Response(503, json={'error': {'message': 'Unavailable'}}))
+            with httpx2.Client(transport=httpx2.MockTransport(handler)) as client, \
+                    patch.dict('os.environ', {'OPENAI_API_KEY': 'mock-key', 'OPENAI_BASE_URL': 'https://example.invalid'}), \
+                    patch('infrastructure.shared.models.text.http_client', return_value=client), \
+                    patch('openai._base_client.time.sleep'), patch.object(main, 'Compiler', return_value=compiler), \
+                    redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                with self.assertRaises(SystemExit) as exit_error:
+                    main.main([str(source), '-o', str(compiler.output_dir)])
+            self.assertEqual(exit_error.exception.code, 1)
+            self.assertEqual(handler.call_count, 6)
+            report = json.loads((compiler.arc_dir / 'compilation.json').read_text(encoding='utf-8'))
+            self.assertEqual(report['status'], 'FAILED')
+            self.assertEqual(report['stages']['02_build_db_schema']['error_type'], 'ProviderTransportUnavailable')
+            self.assertNotIn('03_infer_db_obligations', report['stages'])
+
+    def test_vision_request_also_retries_503_five_times(self):
+        handler = Mock(side_effect=lambda _: httpx2.Response(503, json={'error': {'message': 'Unavailable'}}))
+        with httpx2.Client(transport=httpx2.MockTransport(handler)) as client, \
+                patch.dict('os.environ', {'VISUAL_API_KEY': 'mock-key', 'VISUAL_BASE_URL': 'https://example.invalid'}), \
+                patch('infrastructure.shared.models.vision.http_client', return_value=client), \
+                patch('openai._base_client.time.sleep'), redirect_stdout(StringIO()):
+            with self.assertRaises(ProviderTransportUnavailable):
+                VisualModel().generate_json('Analyze the image', {'image_url': 'data:image/png;base64,AA=='})
+        self.assertEqual(handler.call_count, 6)
+
     def test_real_passes_continue_after_a_design_failure_without_fabricating_obligations(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

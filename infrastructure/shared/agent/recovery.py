@@ -9,6 +9,15 @@ from infrastructure.utils.files import save_bytes, save_json
 from infrastructure.shared.project.git import checkpoint
 
 
+class UpstreamRepairRequired(ValueError):
+    """The current task found a failure owned by an earlier stage."""
+
+    def __init__(self, message, request, feedback=None):
+        super().__init__(message)
+        self.upstream_repair_request = request
+        self.feedback = feedback or {"error": message, "upstream_repair_request": request}
+
+
 def _snapshot(output):
     paths = {path.relative_to(output).as_posix()
         for root in ("backend/src", "backend/tests", "frontend/src", "frontend/tests")
@@ -43,6 +52,8 @@ def implementation_task(output, entry, console, label):
             "feedback": getattr(error, "feedback", None), "changed_files": sorted(changed),
             "deleted_files": sorted(changed - after.keys()),
             "archive": directory.relative_to(output).as_posix()}
+        if request := getattr(error, "upstream_repair_request", None):
+            failure["upstream_repair_request"] = request
         save_json(directory / "failure.json", failure)
         for path in sorted(changed):
             if path in before:
@@ -53,6 +64,8 @@ def implementation_task(output, entry, console, label):
         console.show(label + " | FAILED; continuing", str(error) + "\nBaseline restored. Failure archive: " + failure["archive"])
         checkpoint(output, task=label, action="Archive failed attempt and restore task baseline",
             status="FAILED", details=failure)
+        if isinstance(error, UpstreamRepairRequired):
+            raise
     except BaseException as error:
         checkpoint(output, task=label, action="Record interrupted implementation task",
             status="INTERRUPTED" if isinstance(error, KeyboardInterrupt) else "FAILED",

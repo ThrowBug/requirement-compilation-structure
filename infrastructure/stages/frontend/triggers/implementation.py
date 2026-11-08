@@ -6,9 +6,9 @@ accepted functional smoke scenarios in regression checks."""
 
 import json
 
-from infrastructure.shared.agent.files import editable_application_path
+from infrastructure.shared.agent.recovery import UpstreamRepairRequired, implementation_task, final_checks, complete_report
+from infrastructure.shared.project.stage_impact import database_failure_owner, repair_request_for_owner, stage_write_allowed
 from infrastructure.shared.agent.loop import run_file_agent
-from infrastructure.shared.agent.recovery import implementation_task, final_checks, complete_report
 from infrastructure.shared.agent.tasks import require_design_task, UpstreamTaskError
 from infrastructure.shared.agent.context import SourceFiles
 from infrastructure.shared.agent.discovery import project_index
@@ -19,6 +19,7 @@ from infrastructure.stages.frontend.ui.runtime import APPLICATION_ENTRYPOINTS, p
 from infrastructure.stages.frontend.ui.testing import FrontendChecks, presentation_files, require_green
 from infrastructure.stages.backend.context import related_schema
 from infrastructure.stages.backend.testing import BackendChecks, require_green as require_backend_green
+from infrastructure.stages.database.testing import DatabaseChecks
 from infrastructure.stages.frontend.triggers.design import api_ids, trigger_obligations
 from infrastructure.stages.frontend.triggers.scope import TriggerCheckFailure, model_context
 from infrastructure.shared.project.dependencies import install_dependencies
@@ -57,11 +58,8 @@ def scenario_context(ui, design, rid):
 
 
 def editable_runtime_path(output, path):
-    """Allow evidence-driven database runtime repairs alongside application repairs."""
-    if editable_application_path(output, path):
-        return True
-    return (path.startswith("backend/src/db/") and path.endswith((".ts", ".sql"))
-        and (output / path).is_file())
+    """Keep the legacy helper scoped to the current frontend trigger stage."""
+    return stage_write_allowed(output, "12", path)
 
 
 def test_run_status(result):
@@ -107,14 +105,14 @@ Use edit_file to create the .spec.ts target under frontend/tests/e2e using task.
 expect from frontend/tests/e2e/support/context.ts with a relative .js import. Tests use
 async ({page,database}) callbacks. Use the supplied test utility definitions and actual
 backend source to understand fixture signatures and stored-data conventions. The fixture
-resets a real isolated SQLite database and reapplies requirement-defined startup data before
-each case. Inspect the relevant backend/src/db/seeds/ENTITY.sql when needed; reuse
-prerequisite records and do not assume tables are empty. Do not rerun another requirement's
-registration or content-creation flow just to prepare Given data. If this scenario requires
-absence or a conflicting state, arrange only its relevant records in the isolated database
-before the browser actions. Seed only additional necessary Given rows
-with parameterized SQL and valid values; bind booleans as 0/1. Do not use another API to
-manufacture Given state.
+creates the real application schema in a temporary SQLite database and clears all
+application rows before each case. It does not load production startup rows for the test
+case. Arrange every Given record explicitly in the isolated database, including pre-existing
+accounts, parent rows and valid sessions when the requirement needs them. For a signed-out
+or empty Given state, leave the relevant rows absent and clear the browser credential. Do
+not rerun another requirement's registration or content-creation flow just to prepare Given
+data. Seed only the necessary Given rows with parameterized SQL and valid values; bind
+booleans as 0/1. Do not use another API to manufacture Given state.
 
 Drive actions through the browser, without mocks or injected UI state. Prefer supplied
 UI IDs for stable selectors. Assert the visible business result with retrying Playwright
@@ -129,7 +127,11 @@ exact captions, placeholders or globally unique link names when the requirement 
 specify them. Scope navigation and business-object locators by their semantic purpose.
 
 Tests still need real assertions and must not be skipped or weakened to pass. During
-test generation, fix test syntax, fixtures or invalid selectors. Missing application
+test generation, fix test syntax or invalid selectors inside the current acceptance
+suite. The compiler-owned fixture, runner, configuration and support files are
+read-only; do not add views, triggers, tables or compatibility code to make a test
+pass. If a test uses a table or field absent from the supplied schema, report the
+test/schema mismatch and use the real schema. Missing application
 behavior is valid RED; retain that case for implementation. Runtime failures in supplied
 application sources are implementation feedback, not a reason to rewrite the expected
 business result. Compilation and a real browser run check the suite before code repair.
@@ -175,9 +177,14 @@ URL-based deduplication cache to hide duplicate wiring or suppress legitimate op
 
 For dynamic routes, use the actual router or application routing code to construct and
 parse concrete parameters. Support direct entry, reload, navigation and back/forward as
-required. Identify a clicked row from that row's actual data/callback, not a shared global
-example object or event.target.value from an arbitrary nested icon/span. Carry the selected
-identity through the URL/request/state consistently; encode URL values correctly.
+required. When a supplied page implementation file already exists, trace the concrete
+route from the application entrypoint and ensure that file, or a component with the same
+page contract, is what the browser actually renders. Repair an inline duplicate in the
+entrypoint when it disagrees with the selected page; a correct but unmounted page file
+does not satisfy the route. Identify a clicked row from that row's actual data/callback,
+not a shared global example object or event.target.value from an arbitrary nested icon/span.
+Carry the selected identity through the URL/request/state consistently; encode URL values
+correctly.
 
 Use framework-native form bindings. An input updates only its actual value field; other
 variables in element.data may be read dependencies. Choose appropriate types/conversions
@@ -213,8 +220,10 @@ isolated from real API loading. Normal browser E2E must use real APIs and state;
 recognize its fixtures, fabricate success or hardcode expected responses.
 
 Use task.application_entrypoints for application integration and task.backend_entrypoints
-when backend wiring repairs are necessary. Application sources and generated tests are
-writable according to tools; original designs and shared test tools remain references.
+when backend wiring repairs are necessary. Application sources and the current
+acceptance suite are writable according to tools; original designs and compiler-owned
+test tools remain references. Do not edit frontend/tests/e2e/support,
+frontend/scripts/test-e2e.mjs, the E2E config files or backend/tests/support.
 When startup evidence points into existing database runtime/SQL, repair those files too.
 Preserve the declared schema, constraints, previous tables and requirement-defined seed
 data; correct their executable implementation rather than removing required guarantees.
@@ -273,33 +282,14 @@ def check_frontend_baseline(arc_dir, ui, checks, model, console, report, max_tur
         try:
             baseline = baseline_gate()
         except (ValueError, RuntimeError) as error:
-            selection = SourceFiles(output, ui)
-            backend_selection = SourceFiles(output, root="backend/src", tests_root="backend/tests")
-            context_index = project_index(output,
-                kinds=("schema", "api", "page", "ui_element", "ui_data", "trigger", "requirement",
-                    "test_requirement", "convention", "file"),
-                file_roots=("frontend/src", "frontend/tests", "backend/src", "backend/tests"))
-            workspace = selection.workspace(paths=APPLICATION_ENTRYPOINTS,
-                references=["frontend/src/ui-runtime.ts", "frontend/package.json",
-                    "frontend/tsconfig.json", "frontend/playwright.ui.config.ts"])
-            workspace.allow_write = lambda path: editable_runtime_path(output, path)
-
-            def baseline_feedback(value):
-                return selection.feedback(workspace, backend_selection.feedback(workspace, value))
-
-            repair = run_file_agent(model,
-                "Restore the existing application's compilation and display behavior before business work. "
-                "Read the actual entrypoints and failing sources. Use native framework routing/state/events; "
-                "do not recreate a compiler-owned dispatcher, global input capture or design interpreter. "
-                "Preserve earlier pages, selectors and behavior. This is a shared baseline repair, not "
-                "implementation of all future triggers. Read missing requirement/design evidence on demand. "
-                "Shared presentation/test infrastructure is read-only. Repair the actual application.",
-                {"task": "application_baseline", "application_entrypoints": list(APPLICATION_ENTRYPOINTS)},
-                workspace, baseline_gate, max_turns, console, "Application baseline repair",
-                feedback=getattr(error, "feedback", {"error": str(error)}),
-                feedback_filter=baseline_feedback, context_index=context_index)
-            baseline = repair["checks"]
-            report["baseline"]["repair_turns"] = repair["turns"]
+            request = repair_request_for_owner("12", "10", [*baseline_files, *APPLICATION_ENTRYPOINTS],
+                "Stage 12 的前端基线检查失败，失败文件属于 Stage 10 的页面实现。",
+                check="frontend_baseline")
+            report["baseline"].update(status="FAILED", checks=getattr(error, "feedback", {"error": str(error)}),
+                upstream_repair_request=request)
+            save_json(arc_dir / "frontend_e2e.json", report)
+            raise UpstreamRepairRequired("Frontend baseline is owned by Stage 10", request,
+                feedback=getattr(error, "feedback", {"error": str(error), "upstream_repair_request": request})) from error
         report["baseline"].update(status="GREEN", checks=baseline)
     save_json(arc_dir / "frontend_e2e.json", report)
 
@@ -310,8 +300,8 @@ def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts
     output, checks = prepare_trigger_runtime(arc_dir, backend, ui, design, console, max_tests)
     accepted, implemented = [], set()
     ui_checks = FrontendChecks(output)
-    selection = SourceFiles(output, ui)
-    backend_selection = SourceFiles(output, root="backend/src", tests_root="backend/tests")
+    selection = SourceFiles(output, ui, stage="12")
+    backend_selection = SourceFiles(output, root="backend/src", tests_root="backend/tests", stage="12")
     context_index = project_index(output,
         kinds=("schema", "api", "page", "ui_element", "ui_data", "trigger", "requirement",
             "test_requirement", "convention", "file"),
@@ -373,12 +363,15 @@ def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts
 
             test_context = {**model_context(context), "schema": related_schema(schema, context["backend_apis"].values()), "test_path": relative if (output / relative).is_file() else None,
                 "max_tests": max_tests}
+            test_page_paths = selection.paths("page", pages)
+            test_api_paths = backend_selection.paths("api", called)
             test_workspace = selection.workspace(target=("e2e_test", rid), existing=relative,
                 references=["frontend/src/ui-runtime.ts", CONFIG, FIXTURE, OBSERVATIONS, "backend/tests/support/context.ts",
-                    *selection.paths("page", pages), *APPLICATION_ENTRYPOINTS,
+                    *test_page_paths, *APPLICATION_ENTRYPOINTS,
                     "frontend/package.json", "frontend/tsconfig.json",
-                    *backend_selection.paths("api", called),
-                    *[f"backend/src/db/tables/{name}.sql" for name in related_schema(schema, context["backend_apis"].values())]])
+                    *test_api_paths,
+                    *[f"backend/src/db/tables/{name}.sql" for name in related_schema(schema, context["backend_apis"].values())]],
+                approved_upstream_paths=[*test_page_paths, *APPLICATION_ENTRYPOINTS, *test_api_paths])
             agent, generation_feedback = None, None
             if (output / relative).is_file():
                 try:
@@ -452,12 +445,17 @@ def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts
                     or f"frontend/src/triggers/{tid}.ts") for tid in targets},
                 "backend_entrypoints": {"registry": "backend/src/api/register.ts",
                     "app": "backend/src/app.ts", "server": "backend/src/server.ts"}}
-            workspace = selection.workspace(paths=[*selection.paths("page", pages), "frontend/src/style.css"],
-                references=[relative, *ui_files, "backend/tests/support/context.ts",
+            trigger_paths = [selected_path(output, "trigger", tid) or f"frontend/src/triggers/{tid}.ts"
+                for tid in sorted(targets)]
+            page_paths = selection.paths("page", pages)
+            style_paths = ["frontend/src/style.css"] if (output / "frontend/src/style.css").is_file() else []
+            api_paths = backend_selection.paths("api", called)
+            workspace = selection.workspace(paths=trigger_paths,
+                references=[relative, *ui_files, *page_paths, *style_paths, "frontend/tests/support/context.ts",
                     "frontend/src/ui-runtime.ts", CONFIG, *APPLICATION_ENTRYPOINTS,
-                    "frontend/package.json", "frontend/tsconfig.json"])
-            workspace.allow_write = lambda path: editable_runtime_path(output, path)
-            backend_selection.include(workspace, [*backend_selection.paths("api", called),
+                    "frontend/package.json", "frontend/tsconfig.json"],
+                approved_upstream_paths=[*page_paths, *style_paths, *APPLICATION_ENTRYPOINTS, *api_paths])
+            backend_selection.include(workspace, [*api_paths,
                 *[path for aid in called if (path := selected_path(output, "backend_test", aid))]])
 
             def repair_feedback(value):
@@ -481,10 +479,10 @@ def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts
             save_json(arc_dir / "frontend_e2e.json", report)
             console.show(label + " | GREEN", result["output"])
         save_json(arc_dir / "frontend_e2e.json", report)
-    return verify_frontend(arc_dir, tree, backend, ui, console, report)
+    return verify_frontend(arc_dir, tree, backend, ui, console, report, schema=schema)
 
 
-def verify_frontend(arc_dir, tree, backend, ui, console, report, *, suites=None):
+def verify_frontend(arc_dir, tree, backend, ui, console, report, *, suites=None, schema=None):
     """Check current files again after implementation or independent acceptance repair."""
     output = arc_dir.parent.resolve()
     checks = E2EChecks(output)
@@ -507,6 +505,16 @@ def verify_frontend(arc_dir, tree, backend, ui, console, report, *, suites=None)
         backend_typecheck=(api_checks.typecheck, None),
         backend_tests=(lambda: api_checks.tests(api_files), require_backend_green if api_files else None),
         build=(checks.build, None)))
+    if schema is not None:
+        verification.update(final_checks(console,
+            database=(lambda: DatabaseChecks(output, schema).run(), None)))
+        database = verification.get("database", {}).get("result") or {}
+        if verification.get("database", {}).get("status") == "FAILED":
+            if owned := database_failure_owner(database):
+                owner, paths = owned
+                report["upstream_repair_request"] = repair_request_for_owner(
+                    "12", owner, paths, "最终数据库运行检查失败，当前阶段不能直接修改前阶段运行文件。",
+                    check="database")
     final = verification.get("e2e", {}).get("result") or {}
     ui_final = verification.get("ui", {}).get("result") or {}
     accepted = [rid for rid in tree.leaves if report["requirements"].get(rid, {}).get("status") == "GREEN"]

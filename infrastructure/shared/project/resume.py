@@ -12,6 +12,7 @@ import shutil
 from pathlib import Path
 
 from infrastructure.shared.artifacts.dependency_graph import ARTIFACTS, digest
+from infrastructure.shared.project.stage_impact import validation_modules_for_paths
 from infrastructure.utils.files import save_json
 
 
@@ -201,6 +202,21 @@ class ResumeManager:
         roots = {node.removeprefix("stage:") for node in affected if node.startswith("stage:")}
         roots.update(node.removeprefix("stage:") for node, entry in self.graph.data["nodes"].items()
             if node.startswith("stage:") and entry.get("valid") is False)
+        upstream_requests = []
+        validation_modules = set()
+        for entry in stages.values():
+            stage_result = entry.get("result") if isinstance(entry, dict) else None
+            request = (stage_result.get("upstream_repair_request")
+                if isinstance(stage_result, dict) else None)
+            if not isinstance(request, dict) or request.get("status") != "PENDING":
+                continue
+            upstream_requests.append(request)
+            validation_modules.update(validation_modules_for_paths(self.output,
+                request.get("changed_paths", ()),
+                contract_changed=bool(request.get("contract_changed"))))
+            owner_module = request.get("owner_module")
+            if owner_module:
+                roots.add(owner_module)
         manual = {}
         for path in changed:
             if path in MANUAL_ARTIFACTS and path in after:
@@ -226,9 +242,16 @@ class ResumeManager:
             selected = ordered[first:]
         else:
             selected = []
+        if upstream_requests and validation_modules:
+            if any(request.get("contract_changed") for request in upstream_requests):
+                selected = ordered[min((ordered.index(s) for s in roots if s in ordered), default=0):]
+            else:
+                selected = [stage for stage in ordered if stage in validation_modules
+                    or self.state.get("stages", {}).get(stage, {}).get("status") in BAD_STATUS]
         return {"all": False, "stages": selected, "changed_files": changed,
             "manual_artifacts": manual,
-            "affected_nodes": sorted(affected), "reason": "validated snapshots; conservative shared-stage suffix"}
+            "affected_nodes": sorted(affected), "upstream_requests": upstream_requests,
+            "reason": "validated snapshots and cross-stage repair requests"}
 
     def should_run(self, stage, task=None):
         if task is not None:

@@ -10,6 +10,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI, OpenAIError
 from PIL import Image, ImageOps
+from infrastructure.shared.models import REQUEST_MAX_RETRIES, ProviderTransportUnavailable
 from infrastructure.utils.presentation.model_io import http_client, invoke
 from infrastructure.utils.presentation.console import DemoConsole
 from infrastructure.shared.agent.proposals import propose_json
@@ -77,7 +78,8 @@ class VisualModel:
         if self.reasoning not in {"auto", "provider", "none", "low", "high", "max"}:
             raise ValueError("VISUAL_REASONING must be auto, provider, none, low, high or max")
         self._reasoning_supported = True
-        self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=600, max_retries=2, http_client=http_client())
+        self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=600,
+            max_retries=REQUEST_MAX_RETRIES, http_client=http_client())
 
     def analyze(self, image: Path, max_attempts: int = 10) -> dict:
         """Send one supported reference image and parse the returned layout, elements, and style evidence."""
@@ -118,7 +120,7 @@ class VisualModel:
                     self._reasoning_supported = False
                     print("Provider rejected reasoning controls; using provider defaults.", flush=True)
         except OpenAIError as error:
-            raise RuntimeError(f"Visual model request failed: {error}") from error
+            raise ProviderTransportUnavailable(f"Visual model request failed: {error}") from error
         if not response.choices or not response.choices[0].message.content:
             raise ValueError("Visual model returned empty content")
         return json.loads(response.choices[0].message.content)

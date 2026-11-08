@@ -109,6 +109,30 @@ class UiSemantics(unittest.TestCase):
             self.assertFalse(workspace.can_write(relative))
             self.assertEqual(presentation_files(root, ["editor"]), [relative])
 
+    def test_derives_quoted_accessible_name_when_design_omits_contract(self):
+        tree = RequirementTree({
+            "id": "LOGIN",
+            "description": 'The username field has the placeholder and accessible name "Email/Username/Mobile number".',
+        })
+        design = {
+            "pages": {"login": {"route": "/login", "root": "ROOT"}},
+            "elements": {
+                "ROOT": {"type": "page", "parent": None, "prop": {}, "data": [], "mode": []},
+                "USERNAME": {"type": "input", "parent": "ROOT", "prop": {
+                    "label": "Email/Username/Mobile number",
+                    "placeholder": "Email/Username/Mobile number",
+                }, "data": [], "mode": ["user_write"]},
+            },
+            "requirements": {"LOGIN": ["ROOT", "USERNAME"]},
+            "steps": {},
+        }
+
+        checks, deferred = validated_contracts(design, tree)
+
+        self.assertEqual(checks["USERNAME"]["role"], "textbox")
+        self.assertEqual(checks["USERNAME"]["name"], "Email/Username/Mobile number")
+        self.assertEqual(deferred, [])
+
     @unittest.skipUnless(os.environ.get("ARC_DB_TEST_NODE_MODULES"), "Requires local Node and Chromium")
     def test_real_browser_distinguishes_presence_from_role_and_password_name(self):
         tree, design = fixture()

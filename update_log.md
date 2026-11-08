@@ -81,3 +81,133 @@ Baseline restored. Failure archive: .arc/failures/Independent_acceptance_REQ-2_R
 修改前相关回归 26 项通过（26.218 秒）；修改后专项 61 项通过（36.295 秒），包含第三次 API 提案成功、补回漏掉的写入、保留只读结果、唯一匹配纠正 ID 和 Chromium 测试。语法检查与 `git diff --check` 通过。日志：`.test-tmp/write-review-ui-binding/`。测试使用模拟模型，远程模型调用和 token 均为 0；未重跑 ARC-Bench。空写入复核不会检测已经有写入但字段覆盖不足的情况；平台日志中的 Stage 09 服务错误不在本次修改范围。
 
 最终全量回归 **287 项通过，0 失败、0 错误、0 跳过（492.628 秒）**，包含真实 HTTP、SQLite、Chromium 和缓存恢复。日志：`.test-tmp/write-review-ui-binding/full.log`。
+
+## 2026-11-06：模型请求重试耗尽后退出
+
+平台日志从 Stage 01 开始多次报 `503 model_proxy_error`，9 次失败调用合计等待约 13 分 42 秒。原先客户端最多重试 2 次，耗尽后编译仍尝试下一条需求或阶段。现在文字和图片客户端都允许 SDK 对 503 等可重试错误重试 5 次；仍失败就记录阶段失败、停止编译，命令返回退出码 1。成功取得响应后的提案校验和修改次数保持原样。
+
+离线对照：修改前 21 项相关测试通过；修改后模拟持续 503，文字和图片客户端均发出 6 次请求，编译没有尝试下一条需求或下一阶段。已有回归覆盖普通提案校验失败后仍可继续的情况。未请求远程模型，未消耗远程模型 token。
+
+全量运行 289 项（544.906 秒），仅两项日志测试因仍使用旧断言未通过，其中一项含两个子用例。更新这两项断言后，日志和流程专项复测 22 项全部通过（66.534 秒）。全量日志：`.test-tmp/provider-stop/full.log`。
+
+## 2026-11-07：跨阶段故障归属、写权限和恢复范围
+
+更新时间：2026-11-07 04:32（UTC+08:00）。本轮继续基于 `cjq1`，只处理后阶段修改前阶段产物、失败归属错误和缓存续跑范围过大的问题。
+
+### 参照实现的问题与证据
+
+旧流程允许 Stage 12 在独立验收失败后直接修改数据库、后端注册和前面阶段生成的页面文件。这样无法判断故障来自当前交互实现，还是来自 Stage 05、08、10 已完成的产物。旧的恢复流程也没有把“发现上游故障”和“应该重跑哪些下游阶段”记录成结构化结果。
+
+本轮复现的阶段日志包含：
+
+```text
+No pages require implementation; no model calls, dependency installation or browser tests were run.
+Empty trigger design saved; no model calls were made.
+```
+
+这两个阶段应直接结束，不能因前面阶段的缓存状态异常而重复调用模型。新增恢复测试还验证了数据库失败阶段的归属：`fresh initialization` 归 Stage 05，`fresh server startup` 归 Stage 08，`backend build` 不自动归因到数据库或后端实现阶段。
+
+### 本轮修改
+
+1. **建立阶段所有权。** `stage_impact.py` 根据产物索引、固定目录和生成文件类型确定 Stage 05、08、10、12 的文件归属。
+2. **限制模型写入范围。** Stage 10 只能写页面及其任务明确选择的文件；Stage 12 可以读取上游页面、API、入口和样式，但写入必须是当前需求明确关联的文件。数据库文件、编译器拥有的运行时、后端测试和独立验收套件保持只读。
+3. **记录上游修复请求。** 当前阶段发现前阶段负责的文件或检查失败时，记录 `owner_stage`、`changed_paths`、失败检查和原因，恢复时由上游阶段修复。
+4. **按影响范围续跑。** 数据库实现问题重跑 05、08、12；后端实现问题重跑 08、12；页面实现问题重跑 10、12；契约产物变化从所属契约阶段开始重跑后续阶段。无明确归属的 `backend build` 和通用超时只记录失败，不生成错误的上游修复请求。
+5. **检查已有数据库。** 数据库检查先复制当前 SQLite 数据库，再验证已有数据上的初始化和服务器启动，避免只验证空数据库。
+6. **修复缓存续跑。** 恢复管理器读取阶段结果前检查其结构，不把非对象结果直接当作字典处理。
+
+### 验证与消融
+
+本轮受影响测试 **58 项通过**，覆盖阶段所有权、写权限、跨阶段恢复、已有数据库复制、前端流程、模型请求失败停止、恢复日志和编译器组合。逐阶段测试使用固定模型回复，依次执行 Stage 00–07、续跑到 Stage 08、续跑到 Stage 11、续跑到 Stage 12：
+
+```text
+prefix_status: GREEN_PREFIX
+stage08_status: NO_APIS
+stage11_statuses: 09=GREEN, 10=NO_UI, 11=GREEN
+final_status: GREEN
+final_stage12_status: NO_UI
+final_reused_count: 12
+```
+
+消融结果如下：
+
+| 关闭的机制 | 观察结果 | 启用后的结果 |
+| --- | --- | --- |
+| 阶段写权限 | 后阶段可以修改不属于自己的文件 | 上游文件只能作为只读或明确批准的关联文件使用 |
+| 数据库失败阶段归属 | 不同故障可能被统一归到 Stage 05 | 只有明确的数据库初始化阶段回溯到 Stage 05 |
+| 上游修复请求和影响范围 | 需要从起点重复检查 | 只重跑故障所属阶段及其必要下游 |
+
+本轮固定模型测试没有调用远程模型。`compileall`、`git diff --check` 和逐阶段缓存复用测试通过。全量回归进程由上一轮启动，最终完成结果以该进程的退出报告为准。
+
+## 2026-11-08：数据库最终清理修复的订票需求逐阶段验证
+
+本轮验证使用了 `input/requirements.yaml`。该文件实际是认证流程需求，输出目录命名为 `outputs/ticketing-1108-fix`，名称与需求内容不一致；没有把订票业务字段写入编译器。
+
+### 验证顺序
+
+```text
+uv run main.py input --output-dir outputs/ticketing-1108-fix --until-stage 07
+uv run main.py input --output-dir outputs/ticketing-1108-fix --resume --until-stage 11
+uv run main.py input --output-dir outputs/ticketing-1108-fix --resume
+```
+
+- Stage 00–07：全部 GREEN；Stage 05 的 9 项数据库检查通过，包括已有数据库复制、已有数据库初始化和已有数据库启动。
+- Stage 08：15/15 后端 HTTP 测试通过，类型检查、构建和数据库检查通过。第一次断点恢复时曾出现一次 Windows 进程异常退出，重新执行 Stage 08 后通过，前置 Stage 00–07 均被复用。
+- Stage 09：GREEN。
+- Stage 10：10/10 Playwright UI 检查通过，类型检查和构建通过。
+- Stage 11：5 个触发器设计全部通过。
+- Stage 12：REQ-1、REQ-2、REQ-4 的独立验收通过；最终 UI 10/10、后端 15/15、类型检查、构建和数据库检查通过，但最终 E2E 为 7 通过、2 失败，流水线状态为 `COMPLETED_WITH_FAILURES`。
+
+### Stage 12 失败归因
+
+失败来自生成应用及其验收前置条件，不是本轮数据库最终清理代码引入的错误：
+
+1. REQ-3 的验收要求登录前 `Session` 表为 0 行，但生成应用的 `Session.sql` 预置了一条 `taken_traveler` 会话，导致实际数量为 1。Stage 12 的写权限禁止修改后端种子文件，因此没有越权修改它。
+2. REQ-3 的错误登录检查寻找 `Email/Username/Mobile number` 控件，但 Stage 12 失败回滚后留下的页面路径没有提供该精确可访问名称，导致控件查找超时，错误提示没有被验证。
+
+这两项失败被保留在 `.arc/compilation.json` 和 `.arc/frontend_e2e.json`，没有通过放宽断言、跳过测试或清理失败现场来伪造成功。
+
+### 数据库清理结果
+
+由于本次完整流水线不是全 GREEN，`outputs/ticketing-1108-fix/backend/data/app.db` 被保留，便于诊断；没有生成部署清理成功记录。这符合新规则：只有 Stage 00–12 全部成功时，才删除本次编译创建的 `app.db`、`app.db-wal` 和 `app.db-shm`；编译前已有的数据库始终保留。
+
+### 代码和回归验证
+
+- 数据库清理、已有数据库复制、编译器成功/失败路径和断点续跑专项测试：22 项通过。
+- `python -m compileall`：通过。
+- `git diff --check`：通过。
+- 之前的完整 Python 回归：303 项通过，0 失败、0 错误、6 项跳过。
+
+本轮没有提交或打包。Stage 12 的失败现场表明，后续若要提升订票或其他任务的最终通过率，应单独处理生成测试的初始数据库夹具和登录控件契约；这不属于本轮数据库产物清理修复范围。
+
+## 2026-11-08 11:58（UTC+08:00）：修复 Stage 12 测试夹具与 Schema 名称不一致
+
+### 参照运行和根因
+
+在已有 BookStack 生成应用上，用当前编译器的 schema-only E2E 夹具运行原有验收套件。14 条测试通过，2 条失败，失败日志为：
+
+```text
+SqliteError: no such table: books
+frontend/tests/e2e/acceptance/9fdddadf60c3.spec.ts:11
+INSERT INTO books (id, title, description, tags, created_at) VALUES (?, ?, ?, ?, ?)
+```
+
+实际数据库 Schema 中的表名是 `Book`。失败来自验收测试自行使用了不存在的表名，不能通过给测试数据库增加 `books` 视图或触发器解决。这样会让错误测试通过，并使测试夹具与真实部署结构不一致。
+
+### 修改内容
+
+1. E2E 夹具只执行一次 `initializeDatabase()`，随后清空应用数据，保留真实表、字段、约束和索引。每个测试明确写入自己的 Given 数据。
+2. 夹具比较测试前后的 `sqlite_master`，测试不能创建或修改表、视图、触发器等数据库结构。
+3. Stage 12 的验收提示词要求直接使用 `task.schema` 中的精确表名和字段名，禁止自行发明复数、蛇形命名或兼容层。缺少表或字段时，报告 test/schema mismatch，交给独立测试审查。
+
+将错误测试临时改为写入真实的 `Book` 表后，BookStack 的 16 条浏览器验收全部通过。应用源码、生产种子文件和编译器夹具没有被测试修复修改。
+
+### 验证和消融
+
+- 新增 Schema 名称约束测试：2/2 通过。
+- 独立验收流程测试：12/12 通过。
+- 失败边界测试：8/8 通过。
+- 完整 Python 回归：305 项通过，0 失败，6 项跳过，431.180 秒；使用 UTF-8 环境运行。
+- 真实 BookStack E2E：错误测试为 14/16，通过真实 `Book` 表修正后为 16/16。
+
+关闭“禁止兼容层”时，不存在的 `books` 表可以被视图或触发器隐藏，测试通过但无法证明真实 Schema 正确；启用后错误会保留为可定位的 test/schema mismatch。全部验证使用本地固定代码或已有生成应用，没有发起远程模型请求。

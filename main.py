@@ -8,6 +8,7 @@ from infrastructure.compiler import Compiler
 from infrastructure.utils.cli import resolve_directories
 from infrastructure.utils.presentation.logging import configure_console
 from infrastructure.shared.agent.experiments import OptimizationOptions
+from infrastructure.shared.models import ProviderTransportUnavailable
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -80,7 +81,7 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(130)
     except Exception as error:
         print(f"Compilation failed at {compiler.current_stage or 'startup'}: {error}", file=sys.stderr)
-        raise SystemExit(0)
+        raise SystemExit(1 if isinstance(error, ProviderTransportUnavailable) else 0)
     if compiler.report["status"] == "COMPLETED_WITH_FAILURES":
         print(f"All passes completed. Report: {compiler.arc_dir / 'compilation.json'}", file=sys.stderr)
         raise SystemExit(0)

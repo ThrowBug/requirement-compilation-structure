@@ -33,10 +33,14 @@ modify unrelated files to satisfy target registration. Binding still runs all ch
 
 You own the application entrypoints, routing, component composition and state bindings.
 Read task.application_entrypoints as needed and incrementally connect this page to the
-existing application. Preserve all earlier routes/pages/exports and their behavior; never
-rebuild the application with only this page. Support parameterized routes using the actual
-router/framework or appropriate application code. Do not require a dynamic route pattern
-to equal the literal browser pathname. Route metadata describes intended navigation.
+existing application. The selected page implementation must be the component rendered for
+its route. If an entrypoint contains an inline or duplicate version of the page, replace
+that duplicate with the selected page component or repair the mounted component itself;
+do not leave a correct page file unused beside a different route implementation. Preserve
+all earlier routes/pages/exports and their behavior; never rebuild the application with
+only this page. Support parameterized routes using the actual router/framework or
+appropriate application code. Do not require a dynamic route pattern to equal the literal
+browser pathname. Route metadata describes intended navigation.
 
 Choose component-local state, a shared store or another appropriate mechanism. Initialize
 safe unloaded values and explicit requirement defaults in application code; never manufacture
@@ -94,7 +98,7 @@ def implement_ui(arc_dir: Path, design: dict, model, console, report: dict, max_
     checkpoint(output, stage="10", task="runtime", action="Prepare presentation adapter and browser tests",
         details={"pages": list(design["pages"])})
     accepted = []
-    selection = SourceFiles(output, design)
+    selection = SourceFiles(output, design, stage="10")
     context_index = project_index(output,
         kinds=("page", "ui_element", "ui_data", "requirement", "test_requirement", "file"),
         file_roots=("frontend/src", "frontend/tests"))

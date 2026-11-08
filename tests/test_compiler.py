@@ -33,6 +33,50 @@ PASSES = [
 
 
 class CompilerPipeline(unittest.TestCase):
+    def test_successful_full_pipeline_removes_compiler_runtime_database(self):
+        def load(module):
+            function = next(function for name, function in PASSES if name == module)
+
+            def execute(*arguments, **options):
+                if module == "00_project_initialization":
+                    database = arguments[0] / "backend/data/app.db"
+                    database.parent.mkdir(parents=True)
+                    database.write_text("test runtime", encoding="utf-8")
+                return {"status": "GREEN"}
+
+            return SimpleNamespace(**{function: execute})
+
+        with TemporaryDirectory() as temporary, patch("infrastructure.compiler.import_module", side_effect=load), redirect_stdout(StringIO()):
+            compiler = Compiler(Path(temporary) / "input", Path(temporary) / "output")
+            compiler.compile()
+
+            self.assertEqual(compiler.report["status"], "GREEN")
+            self.assertFalse((compiler.output_dir / "backend/data/app.db").exists())
+            self.assertEqual(compiler.report["deployment_cleanup"]["removed"], ["backend/data/app.db"])
+
+    def test_failed_full_pipeline_preserves_runtime_database_for_diagnosis(self):
+        def load(module):
+            function = next(function for name, function in PASSES if name == module)
+
+            def execute(*arguments, **options):
+                if module == "00_project_initialization":
+                    database = arguments[0] / "backend/data/app.db"
+                    database.parent.mkdir(parents=True)
+                    database.write_text("failure evidence", encoding="utf-8")
+                if module == "01_explore_requirement":
+                    raise ValueError("invalid requirement")
+                return {"status": "GREEN"}
+
+            return SimpleNamespace(**{function: execute})
+
+        with TemporaryDirectory() as temporary, patch("infrastructure.compiler.import_module", side_effect=load), redirect_stdout(StringIO()):
+            compiler = Compiler(Path(temporary) / "input", Path(temporary) / "output")
+            compiler.compile()
+
+            self.assertEqual(compiler.report["status"], "COMPLETED_WITH_FAILURES")
+            self.assertTrue((compiler.output_dir / "backend/data/app.db").is_file())
+            self.assertNotIn("deployment_cleanup", compiler.report)
+
     def test_full_order_arguments_state_and_real_stage_log_context(self):
         calls = []
         original_argv = sys.argv[:]

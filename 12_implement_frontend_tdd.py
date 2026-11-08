@@ -32,9 +32,11 @@ def implement_frontend_triggers(input_dir: Path, arc_dir: Path, pause: bool = Fa
         acceptance = run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, interactions,
             model, console, max_turns, process_report=report, primary=True, max_tests=max_tests)
         report["requirements"].update(acceptance["requirements"])
+        if request := acceptance.get("upstream_repair_request"):
+            report["upstream_repair_request"] = request
         suites = [entry["test_path"] for entry in acceptance["requirements"].values()
             if (arc_dir.parent / entry["test_path"]).is_file()]
-        result = verify_frontend(arc_dir, tree, backend, ui, console, report, suites=suites)
+        result = verify_frontend(arc_dir, tree, backend, ui, console, report, suites=suites, schema=schema)
         result["verification"]["independent_acceptance"] = {"status": "GREEN" if acceptance["status"] == "GREEN" else "FAILED",
             "report": ".arc/independent_acceptance.json"}
         if acceptance["status"] != "GREEN":
@@ -44,6 +46,8 @@ def implement_frontend_triggers(input_dir: Path, arc_dir: Path, pause: bool = Fa
         return result
     except BaseException as error:
         report.update({"status": "FAILED", "error": str(error)})
+        if request := getattr(error, "upstream_repair_request", None):
+            report["upstream_repair_request"] = request
         for requirement in report["requirements"].values():
             if requirement["status"] not in {"GREEN", "NO_TRIGGERS", "NO_DIRECT_TRIGGERS"}:
                 requirement["status"] = "FAILED"

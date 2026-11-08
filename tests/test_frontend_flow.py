@@ -193,9 +193,16 @@ class FrontendFlow(unittest.TestCase):
                     self.assertTrue(payload["files"].get(path, {}).get("writable", True), eid)
                 self.assertNotIn("frontend/tests/ui/editor.spec.ts", payload["files"])
                 for pid in ("editor", "summary"):
-                    self.assertTrue(payload["files"][f"frontend/src/screens/{pid}.tsx"]["writable"])
-                for path in api_paths.values():
-                    self.assertTrue(payload["files"][path]["writable"])
+                    path = f"frontend/src/screens/{pid}.tsx"
+                    if pid in task["page_subtrees"]:
+                        self.assertTrue(payload["files"][path]["writable"])
+                    elif path in payload["files"]:
+                        self.assertFalse(payload["files"][path]["writable"])
+                for aid, path in api_paths.items():
+                    if aid in task["backend_apis"]:
+                        self.assertTrue(payload["files"][path]["writable"])
+                    elif path in payload["files"]:
+                        self.assertFalse(payload["files"][path]["writable"])
                 for path in ("frontend/src/features/other-page-helper.ts", "backend/src/features/other-api-helper.ts", "backend/src/server.ts"):
                     self.assertNotIn(path, payload["files"])
                 self.assertTrue(payload["files"]["frontend/src/style.css"]["writable"])
@@ -219,7 +226,7 @@ class FrontendFlow(unittest.TestCase):
                     return propose_files(self.output, edits)
                 if backend_fails_once:
                     self.assertEqual(payload["feedback"][0]["checks"]["backend_tests"]["returncode"], 1)
-                    self.assertTrue(payload["files"][backend_suites[0]]["writable"])
+                    self.assertFalse(payload["files"][backend_suites[0]]["writable"])
                     repaired = True
                     return propose_files(self.output, [{"path": api_paths["API-SAVE"], "content": "export function handle() { /* API regression repaired */ }"}])
                 repaired = True
@@ -253,6 +260,8 @@ class FrontendFlow(unittest.TestCase):
             "skipped": 0, "flaky": 0, "errors": [], "failures": []}
         api_checks.typecheck.return_value = {"returncode": 0, "output": "compiled backend"}
         api_checks.tests.return_value = {"returncode": 0, "tests": 2, "pass": 2, "fail": 0, "output": "API regression passed"}
+        database_checks = Mock()
+        database_checks.run.return_value = {"returncode": 0, "status": "GREEN", "phase": "output database initialization"}
         if backend_fails_once:
             api_checks.tests.side_effect = [
                 {"returncode": 1, "tests": 2, "pass": 1, "fail": 1, "output": "Assertion failed: " + backend_suites[0]},
@@ -273,7 +282,8 @@ class FrontendFlow(unittest.TestCase):
             api["signature"] = {"method": "POST", "path": "/api/" + aid, "name": aid}
         with patch.object(implementation, "install_dependencies"), \
                 patch.object(implementation, "E2EChecks", return_value=checks), \
-                patch.object(implementation, "BackendChecks", return_value=api_checks) as backend_checks:
+                patch.object(implementation, "BackendChecks", return_value=api_checks) as backend_checks, \
+                patch.object(implementation, "DatabaseChecks", return_value=database_checks):
             report = implementation.run_trigger_tdd(self.arc, self.tree, {"entities": {}},
                 backend, self.ui, self.interactions, {},
                 {rid: {"id": rid} for rid in self.tree.leaves}, Mock(generate_json=generate),

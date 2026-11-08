@@ -11,6 +11,7 @@ from unittest.mock import patch
 import httpx
 from openai import OpenAI
 
+from infrastructure.shared.models import ProviderTransportUnavailable
 from infrastructure.shared.models.text import TextModel, reasoning_arguments, JSON_OUTPUT_RULE
 from infrastructure.shared.models.vision import VisualModel
 from infrastructure.utils.presentation.console import DemoConsole, preview, show_panel, display_width, WaitingStatus
@@ -59,7 +60,7 @@ class ConsoleLogging(unittest.TestCase):
                             self.assertEqual(model.max_output_tokens, 320000)
                         self.assertEqual(transport.timeout.as_dict(),
                             {"connect": 600, "read": 600, "write": 600, "pool": 600})
-                        self.assertEqual(model.client.max_retries, 2)
+                        self.assertEqual(model.client.max_retries, 5)
                     finally:
                         model.client.close()
 
@@ -70,7 +71,7 @@ class ConsoleLogging(unittest.TestCase):
         model.client.max_retries = 0
         with TemporaryDirectory() as temporary, redirect_stdout(StringIO()):
             root = Path(temporary)
-            with console_log(root), self.assertRaisesRegex(RuntimeError, "Connection error"):
+            with console_log(root), self.assertRaisesRegex(ProviderTransportUnavailable, "Connection error"):
                 model.generate_json("Design", {})
             record = json.loads((root / "model_calls.jsonl").read_text().splitlines()[-1])
             self.assertEqual(record["error_type"], "APIConnectionError")

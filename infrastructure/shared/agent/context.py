@@ -8,6 +8,7 @@ from infrastructure.shared.agent.feedback import compact_feedback
 from infrastructure.shared.agent.files import SHARED_SOURCES, SEMANTIC_TEST_ROOT, editable_application_path, editable_sources, source_paths
 from infrastructure.shared.agent.tools import FileTools
 from infrastructure.shared.project.entrypoints import selected_path
+from infrastructure.shared.project.stage_impact import stage_write_allowed
 from infrastructure.utils.files import read_source
 
 
@@ -20,9 +21,12 @@ class SourceFiles:
     corrected against requirements; compiler-owned test utilities remain references.
     """
 
-    def __init__(self, output, ui=None, *, root="frontend/src", tests_root="frontend/tests"):
+    def __init__(self, output, ui=None, *, root="frontend/src", tests_root="frontend/tests", stage=None,
+            approved_upstream_paths=()):
         """Catalogue the layer once; newly created handlers are supplied explicitly."""
         self.output, self.root, self.tests_root = output, root, tests_root
+        self.stage = stage
+        self.approved_upstream_paths = set(approved_upstream_paths)
         self.layer = root.split("/", 1)[0]
         self.sources = set(source_paths(output, root))
         self.editable = set(editable_sources(output, root))
@@ -31,8 +35,19 @@ class SourceFiles:
 
     def paths(self, kind, identities):
         """Return every selected target path, including missing indexed files for repair."""
-        return {relative for identity in identities
-            if (relative := selected_path(self.output, kind, identity)) is not None}
+        selected = set()
+        for identity in identities:
+            if (relative := selected_path(self.output, kind, identity)) is not None:
+                selected.add(relative)
+                continue
+            # Older local fixtures may predate the path index. Reuse an existing
+            # uniquely named implementation, but never guess a new destination.
+            if kind == "page":
+                matches = {path for path in self.sources
+                    if path.rsplit("/", 1)[-1].rsplit(".", 1)[0].casefold() == str(identity).casefold()}
+                if len(matches) == 1:
+                    selected.update(matches)
+        return selected
 
     def is_test(self, relative):
         """Identify generated suites, leaving shared fixtures and test utilities read-only."""
@@ -51,7 +66,7 @@ class SourceFiles:
             seen.add(relative)
             workspace.path(relative)
             workspace.files.add(relative)
-            if relative in self.editable or self.is_test(relative):
+            if (relative in self.editable or self.is_test(relative)) and workspace.can_write(relative):
                 workspace.writable.add(relative)
             target = self.output / relative
             # Shared wiring can import the whole application. Supply its
@@ -69,14 +84,25 @@ class SourceFiles:
                 if found:
                     pending.append(found)
 
-    def workspace(self, *, triggers=(), references=(), target=None, existing=None, paths=()):
+    def workspace(self, *, triggers=(), references=(), target=None, existing=None, paths=(),
+            approved_upstream_paths=()):
         """Include all requested handlers; a missing new target retains model-selected naming."""
         self.sources.update(source_paths(self.output, self.root))
         self.editable.update(editable_sources(self.output, self.root))
         self.tests.update(source_paths(self.output, self.tests_root))
         workspace = (FileTools.for_target(self.output, *target, existing=existing)
             if target else FileTools(self.output, ()))
-        workspace.allow_write = lambda path: editable_application_path(self.output, path)
+        stage = self.stage
+        approved = self.approved_upstream_paths | set(approved_upstream_paths)
+        workspace.stage = stage
+        workspace.stage_allowed_paths = set(paths)
+        workspace.approved_upstream_paths = approved
+        if stage is None:
+            workspace.allow_write = lambda path: editable_application_path(self.output, path)
+        else:
+            workspace.allow_write = lambda path: stage_write_allowed(self.output, stage, path,
+                explicit_paths=workspace.stage_allowed_paths,
+                approved_upstream_paths=workspace.approved_upstream_paths)
         paths = set(paths) | self.paths("trigger", triggers)
         paths.update(workspace.writable)
         # New handlers may have been created since this catalogue was built.
@@ -84,7 +110,9 @@ class SourceFiles:
         self.editable.update(path for path in paths if path.startswith(self.root + "/"))
         self.include(workspace, paths)
         workspace.files.update(references)
-        workspace.writable.update(path for path in references if self.is_test(path))
+        for path in references:
+            if self.is_test(path) and workspace.can_write(path):
+                workspace.writable.add(path)
         return workspace
 
     def feedback(self, workspace, value):

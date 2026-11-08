@@ -15,6 +15,7 @@ from infrastructure.stages.backend.context import load_context, requirement_cont
 from infrastructure.utils.files import read_artifact
 from infrastructure.stages.backend.runtime import REGISTER_PATH, TEST_RUNNER_PATH, TEST_SUPPORT_PATH, prepare_runtime, test_path
 from infrastructure.stages.backend.testing import BackendChecks, require_green, test_run_status
+from infrastructure.stages.database.testing import DatabaseChecks
 from infrastructure.utils.cli import create_parser, resolve_directories
 from infrastructure.shared.models.text import TextModel
 from infrastructure.utils.presentation.console import DemoConsole
@@ -259,7 +260,7 @@ def implement_backend_tdd(arc_dir: Path, pause: bool = False, max_turns: int = 1
     checks = BackendChecks(output)
     routes = compiler_routes(output, contracts["apis"])
     wired = {}
-    selection = SourceFiles(output, root="backend/src", tests_root="backend/tests")
+    selection = SourceFiles(output, root="backend/src", tests_root="backend/tests", stage="08")
     model = TextModel() if contracts["apis"] else None
     context_index = project_index(output,
         kinds=("schema", "api", "requirement", "test_requirement", "convention", "file"),
@@ -421,7 +422,8 @@ def implement_backend_tdd(arc_dir: Path, pause: bool = False, max_turns: int = 1
         verification = final_checks(console,
             typecheck=(checks.typecheck, None),
             tests=(lambda: checks.tests(all_files), require_green if all_files else None),
-            build=(checks.build, None))
+            build=(checks.build, None),
+            database=(lambda: DatabaseChecks(output, schema).run(), None))
         final = verification["tests"].get("result") or {}
         report["summary"] = {key: final.get(key, 0) for key in ("tests", "pass", "fail")}
         complete_report(report, [*report.get("apis", {}).values(), *blocked.values()], verification)

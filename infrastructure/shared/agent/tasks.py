@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 
+from infrastructure.shared.models import ProviderTransportUnavailable
 from infrastructure.shared.project.git import checkpoint
 from infrastructure.utils.files import save_json, read_artifact
 
@@ -45,7 +46,7 @@ class TaskFailures:
         try:
             yield
         except Exception as error:
-            if isinstance(error, OSError):
+            if isinstance(error, (OSError, ProviderTransportUnavailable)):
                 raise
             self.report['tasks'][identity] = {'status': 'FAILED', 'error': str(error),
                 'error_type': type(error).__name__}

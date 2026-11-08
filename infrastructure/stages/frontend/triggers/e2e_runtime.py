@@ -1,8 +1,9 @@
 """Step 12 test infrastructure: real application servers and isolated SQLite data.
 
 Compiler-owned Playwright, Vite, Node-runner, and fixture source strings are written
-by prepare_e2e(). Each browser run owns temporary database files; test cases reset
-their data. Business handlers and scenario assertions are generated separately."""
+by prepare_e2e(). Each browser run owns temporary database files; every test arranges
+its own Given data on a schema-only database. Business handlers and scenario assertions
+are generated separately."""
 
 import json
 
@@ -91,14 +92,30 @@ export const test = base.extend<{ database: Database.Database; applicationErrors
     const connection = createDatabaseClient(path);
     try {
       initializeDatabase(connection);
+      const schemaBefore = connection.prepare(`
+        SELECT type, name, tbl_name, sql
+        FROM sqlite_master
+        WHERE name NOT LIKE 'sqlite_%'
+        ORDER BY type, name
+      `).all();
       connection.pragma("foreign_keys = OFF");
       connection.transaction(() => {
         const tables = connection.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as { name: string }[];
         for (const table of tables) connection.exec(`DELETE FROM "${table.name.replaceAll('"', '""')}"`);
       })();
+      // The application initializer also loads production startup rows.  The E2E
+      // database is only a schema source: each acceptance test owns its Given state,
+      // so signed-out, empty and pre-existing-record scenarios remain independent.
       connection.pragma("foreign_keys = ON");
-      initializeDatabase(connection);
       await use(connection);
+      const schemaAfter = connection.prepare(`
+        SELECT type, name, tbl_name, sql
+        FROM sqlite_master
+        WHERE name NOT LIKE 'sqlite_%'
+        ORDER BY type, name
+      `).all();
+      if (JSON.stringify(schemaAfter) !== JSON.stringify(schemaBefore))
+        throw new Error("E2E tests must not change the application database schema");
     } finally { connection.close(); }
   }, { auto: true }],
   applicationErrors: [async ({ page, database }, use) => {

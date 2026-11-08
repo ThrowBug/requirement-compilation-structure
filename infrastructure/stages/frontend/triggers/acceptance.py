@@ -12,13 +12,14 @@ from infrastructure.shared.agent.feedback import compact_feedback
 from infrastructure.shared.agent.loop import FileGateHandoff, run_file_agent
 from infrastructure.shared.agent.context import SourceFiles
 from infrastructure.shared.agent.discovery import project_index
-from infrastructure.shared.agent.recovery import implementation_task
+from infrastructure.shared.agent.recovery import UpstreamRepairRequired, implementation_task
 from infrastructure.shared.agent.tasks import require_design_task, UpstreamTaskError
 from infrastructure.shared.project.entrypoints import selected_path
+from infrastructure.shared.project.stage_impact import repair_request_for_owner
 from infrastructure.stages.backend.context import requirement_context, related_schema
 from infrastructure.stages.backend.testing import BackendChecks, require_green as require_backend_green
 from infrastructure.stages.requirements.tree import RequirementTree
-from infrastructure.stages.frontend.triggers.implementation import scenario_context, IMPLEMENT_INSTRUCTIONS, editable_runtime_path, test_run_status
+from infrastructure.stages.frontend.triggers.implementation import scenario_context, IMPLEMENT_INSTRUCTIONS, test_run_status
 from infrastructure.stages.frontend.triggers.e2e_runtime import FIXTURE, OBSERVATIONS
 from infrastructure.stages.frontend.triggers.testing import E2EChecks, test_path
 from infrastructure.stages.frontend.triggers.scope import TriggerCheckFailure
@@ -65,13 +66,18 @@ body after a full document navigation. Do not count all application requests glo
 Use test_count_hint as a size guide, never as a reason to omit an explicit outcome.
 Cover every required scenario outcome, including cancel/no-write where stated.
 
-The database fixture restores requirement-defined startup data before each test. Reuse
-those records when required; do not assume an empty database or insert duplicate identities.
-Use prerequisite records to isolate the current requirement from other requirements'
-registration/creation implementations. Arrange scenario-specific absence or conflicting
-Given states in the isolated test database; still drive the current When through the UI.
-Seed additional minimal valid Given records using the documented database/test utilities. Application
+The database fixture creates the real schema in a temporary database and clears all
+application rows before each test. It does not restore production startup rows. Arrange
+every Given record explicitly with the supplied database fixture and schema, including
+pre-existing accounts, parent rows and valid sessions when required. For a signed-out or
+empty Given state, leave the relevant rows absent and clear browser credentials. Still
+drive the current When through the UI. Seed only the minimal valid Given records; do not
+run another requirement's registration or content-creation flow as setup. Application
 sources, shared fixtures, original requirements and other suites are not editable.
+When a fixture writes directly to the database, use only the exact table and column names
+listed in task.schema. Never invent plural or snake_case aliases and never create a view,
+trigger, table, or other compatibility layer to make a test run. If a required table or
+field is absent, report a test/schema mismatch for review and use the actual schema evidence.
 For successful submissions, perform every required action (including checking consent),
 including when reusing a shared form for setup. For dates relative to today, derive valid
 input dates at test execution and compare stored dates with the values actually submitted.
@@ -297,8 +303,8 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
     backend_checks = BackendChecks(output)
     verified_http = (read_artifact(arc_dir, 'backend_tdd.json').get('green', {})
         if primary and (arc_dir / 'backend_tdd.json').is_file() else {})
-    selection = SourceFiles(output, ui)
-    backend_selection = SourceFiles(output, root='backend/src', tests_root='backend/tests')
+    selection = SourceFiles(output, ui, stage='12')
+    backend_selection = SourceFiles(output, root='backend/src', tests_root='backend/tests', stage='12')
     context_index = project_index(output,
         kinds=('schema', 'api', 'page', 'ui_element', 'ui_data', 'trigger', 'requirement',
             'test_requirement', 'convention', 'file'),
@@ -467,12 +473,15 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                     if peer in tree.requirements and paired:
                         repair_task['target_trigger_ids'] = sorted(set(repair_task['target_trigger_ids'])
                             | set(design['requirements'].get(peer, ())))
+                page_paths = selection.paths('page', context['page_subtrees'])
+                style_paths = ['frontend/src/style.css'] if (output / 'frontend/src/style.css').is_file() else []
+                api_paths = backend_selection.paths('api', aids)
                 repair_workspace = selection.workspace(
-                    paths=[*selection.paths('page', context['page_subtrees']), *handlers],
-                    references=[path, *(['frontend/vite.config.ts', FIXTURE] if primary else
+                    paths=[*page_paths, *handlers],
+                    references=[path, *style_paths, *(['frontend/vite.config.ts', FIXTURE] if primary else
                         [*ui_files, FIXTURE, OBSERVATIONS]), 'frontend/src/ui-runtime.ts',
-                        *APPLICATION_ENTRYPOINTS, 'frontend/package.json', 'frontend/tsconfig.json'])
-                repair_workspace.allow_write = lambda relative: editable_runtime_path(output, relative)
+                        *APPLICATION_ENTRYPOINTS, 'frontend/package.json', 'frontend/tsconfig.json'],
+                    approved_upstream_paths=[*page_paths, *style_paths, *APPLICATION_ENTRYPOINTS, *api_paths])
                 prefer_edit = bool(primary and aids and aids <= verified_http.keys() and result.get('failed')
                     and not result.get('errors'))
                 if primary:
@@ -483,7 +492,7 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                     if prefer_edit:
                         repair_workspace = FirstEditWorkspace(repair_workspace)
                 else:
-                    backend_selection.include(repair_workspace, backend_selection.paths('api', aids))
+                    backend_selection.include(repair_workspace, api_paths)
                 latest_acceptance = result
                 ran_regressions = False
                 repair_reviews = 0
@@ -526,6 +535,13 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                         if evidence['build']['returncode']:
                             raise ValueError(evidence['build']['output'])
                     except (ValueError, RuntimeError) as error:
+                        if check in {'backend_typecheck', 'backend'}:
+                            request = repair_request_for_owner(
+                                '12', '08', ['backend/src/api/register.ts', 'backend/src/app.ts', 'backend/src/server.ts'],
+                                '独立验收发现后端检查失败，后端实现由 Stage 08 负责。', check=check)
+                            raise UpstreamRepairRequired(
+                                'Backend verification is owned by Stage 08', request,
+                                feedback={**evidence, 'upstream_repair_request': request}) from error
                         message = f'Independent acceptance repair failed at {check}' if check in evidence else str(error)
                         raise TriggerCheckFailure(message, evidence) from error
                     return evidence
@@ -642,6 +658,9 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
             entry.update(status='FAILED', error=str(error))
             if isinstance(error, UpstreamTaskError):
                 entry["blocked_by"] = error.blocked_by
+            if request := getattr(error, 'upstream_repair_request', None):
+                entry['upstream_repair_request'] = request
+                report['upstream_repair_request'] = request
         finally:
             save_json(arc_dir / 'independent_acceptance.json', report)
             checkpoint(output, stage="12", task=rid, action="Publish independent requirement acceptance",
